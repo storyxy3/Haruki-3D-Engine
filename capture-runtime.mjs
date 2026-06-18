@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,8 @@ function parseArgs(argv) {
   const options = {
     input: "",
     out: "",
+    outDir: "",
+    imageId: "",
     phase: 0.5,
     clip: "motion_loop",
     width: 1400,
@@ -39,7 +42,8 @@ function parseArgs(argv) {
     yaw: "",
     bodyDebugMode: "off",
     renderIsolation: "normal",
-    springRuntimeMode: "off",
+    springRuntimeMode: "unity-prefab",
+    cameraPreset: "id5-debug",
     traceUtjBones: [],
     traceUtjMaxEvents: 240,
     traceOut: "",
@@ -61,6 +65,10 @@ function parseArgs(argv) {
       options.input = readValue();
     } else if (arg === "--out" || arg === "-o") {
       options.out = readValue();
+    } else if (arg === "--out-dir") {
+      options.outDir = readValue();
+    } else if (arg === "--image-id") {
+      options.imageId = readValue();
     } else if (arg === "--phase") {
       options.phase = Number(readValue());
     } else if (arg === "--clip") {
@@ -89,6 +97,12 @@ function parseArgs(argv) {
         throw new Error(`Invalid --spring-runtime-mode ${mode}`);
       }
       options.springRuntimeMode = mode === "webgl-utj" ? "unity-prefab" : mode;
+    } else if (arg === "--camera-preset") {
+      const preset = readValue();
+      if (!["default", "id5-debug"].includes(preset)) {
+        throw new Error(`Invalid --camera-preset ${preset}`);
+      }
+      options.cameraPreset = preset;
     } else if (arg === "--utj-springbone") {
       options.springRuntimeMode = "unity-prefab";
     } else if (arg === "--no-utj-springbone") {
@@ -117,6 +131,17 @@ function parseArgs(argv) {
 
   if (!options.input) {
     throw new Error("Missing --input converter output directory.");
+  }
+  if (options.imageId || options.outDir) {
+    if (!options.imageId || !options.outDir) {
+      throw new Error("--image-id and --out-dir must be used together.");
+    }
+    if (options.out) {
+      throw new Error("--out cannot be combined with --image-id/--out-dir.");
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(options.imageId) || options.imageId === "." || options.imageId === "..") {
+      throw new Error(`Invalid --image-id ${options.imageId}`);
+    }
   }
   if (!Number.isFinite(options.phase)) {
     options.phase = 0.5;
@@ -162,6 +187,7 @@ function parseArgs(argv) {
   }
   options.input = path.resolve(options.input);
   options.out = path.resolve(options.out || path.join(process.cwd(), "capture.png"));
+  options.outDir = options.outDir ? path.resolve(options.outDir) : "";
   options.traceOut = options.traceOut ? path.resolve(options.traceOut) : "";
   return options;
 }
@@ -171,6 +197,8 @@ function printHelp() {
   npm run capture:runtime -- --input <converter-output> --out <capture.png>
 
 Options:
+  --image-id <id>     Stable PNG id when used with --out-dir; writes <out-dir>/<id>.png
+  --out-dir <dir>     Stable PNG output directory for --image-id
   --phase <0..1>       Loop phase to capture. Default: 0.5
   --clip <name>        Clip to capture: motion or motion_loop. Default: motion_loop
   --width <px>         Browser viewport width. Default: 1400
@@ -185,7 +213,8 @@ Options:
   --render-isolation <mode>
                        Render isolation/debug mode. Default: normal
   --spring-runtime-mode <mode>
-                       Spring runtime: off, unity-prefab. Default: off
+                       Spring runtime: off, unity-prefab. Default: unity-prefab
+  --camera-preset <id> Camera preset: default, id5-debug. Default: id5-debug
   --utj-springbone     Compatibility alias for --spring-runtime-mode unity-prefab
   --no-utj-springbone  Compatibility alias for --spring-runtime-mode off
   --trace-utj-bone <s> Trace spring stages for bones whose name/path contains this text
@@ -201,7 +230,7 @@ function assertConverterPackage(inputDir) {
   const runtimePath = path.join(inputDir, "pjsk-sekai-runtime.extension.json");
   if (!fs.existsSync(runtimePath)) {
     throw new Error(
-      `Input is not a converter package: missing ${runtimePath}`
+      `Capture requires a full runtime package: missing ${runtimePath}`
     );
   }
 }
@@ -293,6 +322,44 @@ function startStaticServer(inputDir) {
       resolve({ server, port: address.port });
     });
   });
+}
+
+function createCaptureTempDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "haruki-3d-capture-"));
+}
+
+function removeCapturePath(targetPath) {
+  try {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
+async function removeCapturePathWithRetry(targetPath) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+      if (!fs.existsSync(targetPath)) {
+        return;
+      }
+    } catch {
+      // Retry below.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+  }
+  try {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+  } catch {
+    // Final best-effort cleanup.
+  }
+}
+
+function buildOutputPath(options) {
+  if (options.outDir && options.imageId) {
+    return path.join(options.outDir, `${options.imageId}.png`);
+  }
+  return options.out;
 }
 
 function getFreePort() {
@@ -529,7 +596,17 @@ async function waitForCaptureReady(client, timeoutMs) {
 async function capture(options) {
   assertConverterPackage(options.input);
   maybeBuildDist(options.build);
-  fs.mkdirSync(path.dirname(options.out), { recursive: true });
+  const outputPath = buildOutputPath(options);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  const tempRoot = createCaptureTempDir();
+  const chromiumProfileDir = path.join(tempRoot, "profile");
+  const chromiumCacheDir = path.join(tempRoot, "cache");
+  const chromiumMediaCacheDir = path.join(tempRoot, "media-cache");
+  const tempOutputPath = path.join(
+    path.dirname(outputPath),
+    `.${path.basename(outputPath)}.${process.pid}.tmp`
+  );
 
   const { server, port } = await startStaticServer(options.input);
   const debugPort = await getFreePort();
@@ -542,6 +619,8 @@ async function capture(options) {
     `&bodyDebugMode=${encodeURIComponent(options.bodyDebugMode)}` +
     `&renderIsolation=${encodeURIComponent(options.renderIsolation)}` +
     `&springRuntimeMode=${encodeURIComponent(options.springRuntimeMode)}` +
+    `&cameraPreset=${encodeURIComponent(options.cameraPreset)}` +
+    `&captureFullRuntimeOnly=true` +
     `&utjTraceMaxEvents=${options.traceUtjMaxEvents}` +
     options.traceUtjBones.map((filter) => `&utjTraceBone=${encodeURIComponent(filter)}`).join("") +
     (options.yaw ? `&characterYawMode=${encodeURIComponent(options.yaw)}` : "");
@@ -553,6 +632,11 @@ async function capture(options) {
     "--no-default-browser-check",
     "--disable-dev-shm-usage",
     "--no-sandbox",
+    `--user-data-dir=${chromiumProfileDir}`,
+    `--disk-cache-dir=${chromiumCacheDir}`,
+    `--media-cache-dir=${chromiumMediaCacheDir}`,
+    "--disable-application-cache",
+    "--aggressive-cache-discard",
     `--remote-debugging-port=${debugPort}`,
     `--window-size=${options.width},${options.height}`,
     "about:blank",
@@ -587,7 +671,8 @@ async function capture(options) {
       format: "png",
       fromSurface: true,
     });
-    fs.writeFileSync(options.out, Buffer.from(image.data, "base64"));
+    fs.writeFileSync(tempOutputPath, Buffer.from(image.data, "base64"));
+    fs.renameSync(tempOutputPath, outputPath);
     if (options.traceOut) {
       fs.mkdirSync(path.dirname(options.traceOut), { recursive: true });
       fs.writeFileSync(
@@ -596,7 +681,7 @@ async function capture(options) {
       );
     }
     console.log(JSON.stringify({
-      output: options.out,
+      output: outputPath,
       traceOutput: options.traceOut || null,
       input: options.input,
       phase: options.phase,
@@ -612,8 +697,22 @@ async function capture(options) {
     throw error;
   } finally {
     client?.close();
+    if (fs.existsSync(tempOutputPath)) {
+      removeCapturePath(tempOutputPath);
+    }
     chromium.kill("SIGTERM");
-    server.close();
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        chromium.kill("SIGKILL");
+        resolve(null);
+      }, 5000);
+      chromium.once("close", () => {
+        clearTimeout(timer);
+        resolve(null);
+      });
+    });
+    await new Promise((resolve) => server.close(() => resolve(null)));
+    await removeCapturePathWithRetry(tempRoot);
   }
 }
 

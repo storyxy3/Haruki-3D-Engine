@@ -199,6 +199,7 @@ h2 {
   color: #5b4335;
   border: 1px solid rgba(35, 23, 16, 0.08);
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .stack {

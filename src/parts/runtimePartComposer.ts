@@ -45,6 +45,12 @@ export type HeadHairCompatibility = {
     headCostume3dId: number;
     hairCostume3dId: number;
   }>;
+  rules?: Array<{
+    unit?: string | null;
+    headCostume3dId: number;
+    hairCostume3dId: number;
+    state?: string | null;
+  }>;
 };
 
 export type PartRuntimePackage = {
@@ -122,27 +128,39 @@ export function getCharacterIndexEntries(index: Character3dIndex): Character3dIn
 }
 
 export function getDefaultCustomSelection(partSet: PartPackageSet): CustomPartSelection | null {
-  const preset = partSet.characterIndex.find(hasCompletePresetParts);
+  const preset = partSet.characterIndex.find((entry) =>
+    hasCompletePresetParts(entry) &&
+    hasLoadedPart(partSet, entry.characterId, "body", entry.bodyCostume3dId) &&
+    hasLoadedPart(partSet, entry.characterId, "head", entry.headCostume3dId) &&
+    hasLoadedPart(partSet, entry.characterId, "hair", entry.hairCostume3dId) &&
+    (
+      !entry.headOptionalCostume3dId ||
+      hasLoadedPart(partSet, entry.characterId, "head_optional", entry.headOptionalCostume3dId)
+    )
+  );
   if (preset) {
+    const bodyCostume3dId = preset.bodyCostume3dId!;
+    const headCostume3dId = preset.headCostume3dId!;
+    const hairCostume3dId = preset.hairCostume3dId!;
     return {
       characterId: preset.characterId,
       unit: preset.unit,
-      bodyCostume3dId: preset.bodyCostume3dId,
-      headCostume3dId: preset.headCostume3dId,
-      hairCostume3dId: preset.hairCostume3dId,
+      bodyCostume3dId,
+      headCostume3dId,
+      hairCostume3dId,
       headOptionalCostume3dId: preset.headOptionalCostume3dId ?? null,
     };
   }
 
-  const body = findFirstPart(partSet.registry, "body");
-  const head = findFirstPart(partSet.registry, "head");
-  const hair = findFirstPart(partSet.registry, "hair");
-  if (!body || !head || !hair) {
+  const body = findFirstLoadedPart(partSet, "body");
+  if (!body) {
     return null;
   }
-  if (body.characterId !== head.characterId || body.characterId !== hair.characterId) {
+  const headHairPair = findFirstCompatibleLoadedHeadHair(partSet, body.characterId);
+  if (!headHairPair) {
     return null;
   }
+  const { head, hair } = headHairPair;
   return {
     characterId: body.characterId,
     unit: body.unit ?? head.unit ?? hair.unit ?? null,
@@ -162,6 +180,7 @@ export function listSelectableParts(
     .filter((entry) => entry.characterId === characterId)
     .filter((entry) => normalizeRuntimePartType(entry.partType) === partType)
     .filter((entry) => entry.status !== "missing")
+    .filter((entry) => partSet.packages.has(entry.packagePath))
     .sort((left, right) => left.costume3dId - right.costume3dId);
 }
 
@@ -209,8 +228,48 @@ export function composeRuntimeCombinedCharacterAsset(
   };
 }
 
-function findFirstPart(registry: PartRegistryEntry[], partType: RuntimePartType) {
-  return registry.find((entry) => normalizeRuntimePartType(entry.partType) === partType);
+function findFirstLoadedPart(
+  partSet: PartPackageSet,
+  partType: RuntimePartType,
+  characterId?: number
+) {
+  return partSet.registry.find((entry) =>
+    normalizeRuntimePartType(entry.partType) === partType &&
+    (characterId === undefined || entry.characterId === characterId) &&
+    entry.status !== "missing" &&
+    partSet.packages.has(entry.packagePath)
+  );
+}
+
+function findFirstCompatibleLoadedHeadHair(partSet: PartPackageSet, characterId: number) {
+  const heads = listSelectableParts(partSet, characterId, "head");
+  const hairs = listSelectableParts(partSet, characterId, "hair");
+  const deniedKeys = buildDeniedCompatibilityKeys(partSet.compatibility);
+  for (const head of heads) {
+    for (const hair of hairs) {
+      const selection = {
+        characterId,
+        unit: head.unit ?? hair.unit ?? null,
+        bodyCostume3dId: 0,
+        headCostume3dId: head.costume3dId,
+        hairCostume3dId: hair.costume3dId,
+        headOptionalCostume3dId: null,
+      };
+      if (!deniedKeys.has(compatibilityKey(selection.unit, selection.headCostume3dId, selection.hairCostume3dId))) {
+        return { head, hair };
+      }
+    }
+  }
+  return null;
+}
+
+function hasLoadedPart(
+  partSet: PartPackageSet,
+  characterId: number,
+  partType: RuntimePartType,
+  costume3dId: number
+) {
+  return Boolean(findLoadedPart(partSet, characterId, partType, costume3dId));
 }
 
 function hasCompletePresetParts(entry: Character3dIndexEntry): entry is Character3dIndexEntry & {
@@ -230,20 +289,28 @@ function requirePart(
   partType: RuntimePartType,
   costume3dId: number
 ): PartRuntimePackage {
-  const entry = partSet.registry.find(
+  const entry = findLoadedPart(partSet, characterId, partType, costume3dId);
+  if (!entry) {
+    throw new Error(`Missing loaded ${partType} package for character ${characterId}, costume3dId ${costume3dId}.`);
+  }
+  const runtime = partSet.packages.get(entry.packagePath);
+  return runtime!;
+}
+
+function findLoadedPart(
+  partSet: PartPackageSet,
+  characterId: number,
+  partType: RuntimePartType,
+  costume3dId: number
+) {
+  return partSet.registry.find(
     (candidate) =>
       candidate.characterId === characterId &&
       candidate.costume3dId === costume3dId &&
-      normalizeRuntimePartType(candidate.partType) === partType
+      normalizeRuntimePartType(candidate.partType) === partType &&
+      candidate.status !== "missing" &&
+      partSet.packages.has(candidate.packagePath)
   );
-  if (!entry) {
-    throw new Error(`Missing ${partType} registry entry for character ${characterId}, costume3dId ${costume3dId}.`);
-  }
-  const runtime = partSet.packages.get(entry.packagePath);
-  if (!runtime) {
-    throw new Error(`Missing loaded part package: ${entry.packagePath}`);
-  }
-  return runtime;
 }
 
 function assertSameCharacter(characterId: number, packages: PartRuntimePackage[]) {
@@ -263,24 +330,23 @@ function assertHeadHairCompatible(
     return;
   }
   const key = compatibilityKey(selection.unit, selection.headCostume3dId, selection.hairCostume3dId);
-  const denied = new Set(
-    (compatibility.denied ?? []).map((entry) =>
+  if (buildDeniedCompatibilityKeys(compatibility).has(key)) {
+    throw new Error(`Head ${selection.headCostume3dId} and hair ${selection.hairCostume3dId} are not available together.`);
+  }
+}
+
+function buildDeniedCompatibilityKeys(compatibility: HeadHairCompatibility | null) {
+  if (!compatibility) {
+    return new Set<string>();
+  }
+  return new Set(
+    [
+      ...(compatibility.denied ?? []),
+      ...(compatibility.rules ?? []).filter((entry) => entry.state === "not_available"),
+    ].map((entry) =>
       compatibilityKey(entry.unit, entry.headCostume3dId, entry.hairCostume3dId)
     )
   );
-  if (denied.has(key)) {
-    throw new Error(`Head ${selection.headCostume3dId} and hair ${selection.hairCostume3dId} are not available together.`);
-  }
-  if ((compatibility.allowed ?? []).length > 0) {
-    const allowed = new Set(
-      (compatibility.allowed ?? []).map((entry) =>
-        compatibilityKey(entry.unit, entry.headCostume3dId, entry.hairCostume3dId)
-      )
-    );
-    if (!allowed.has(key)) {
-      throw new Error(`Head ${selection.headCostume3dId} and hair ${selection.hairCostume3dId} are not listed as an allowed combination.`);
-    }
-  }
 }
 
 function compatibilityKey(unit: string | null | undefined, headCostume3dId: number, hairCostume3dId: number) {
@@ -295,11 +361,21 @@ function normalizeBodyManifestFromPart(
   manifest.id ||= `body-${runtime.part.costume3dId}`;
   manifest.displayName ||= runtime.part.name ?? manifest.id;
   manifest.characterId = String(runtime.part.characterId).padStart(2, "0");
+  manifest.source ||= { bundleRoot: "", manifestUrl: "", meshUrl: "" };
+  manifest.neckAnchor = normalizeVec3(manifest.neckAnchor, { x: 0, y: 1.75, z: 0.15 });
+  manifest.skeleton ||= {} as BodyAssetManifest["skeleton"];
+  manifest.skeleton.neckAttach ||= { fallbackPosition: { x: 0, y: 1.75, z: 0.15 } };
+  manifest.skeleton.neckAttach.fallbackPosition = normalizeVec3(
+    manifest.skeleton.neckAttach.fallbackPosition,
+    { x: 0, y: 1.75, z: 0.15 }
+  );
+  manifest.bodyMaterials ||= [];
+  const resolvePartUrl = createPartUrlResolver(runtime, resolveUrl);
   manifest.source = {
     ...manifest.source,
-    meshUrl: resolveRequiredUrl(manifest.source?.meshUrl, resolveUrl),
-    skeletonUrl: resolveMaybeUrl(manifest.source?.skeletonUrl, resolveUrl),
-    animationUrls: manifest.source?.animationUrls?.map((url) => resolveRequiredUrl(url, resolveUrl)),
+    meshUrl: resolveRequiredUrl(manifest.source?.meshUrl, resolvePartUrl),
+    skeletonUrl: resolveMaybeUrl(manifest.source?.skeletonUrl, resolvePartUrl),
+    animationUrls: manifest.source?.animationUrls?.map((url) => resolveRequiredUrl(url, resolvePartUrl)),
   };
   manifest.bodyMaterials = mergeMaterialSlots(manifest.bodyMaterials, [runtime]);
   return manifest;
@@ -315,17 +391,61 @@ function normalizeHeadManifestFromParts(
   manifest.id = `head-${selection.headCostume3dId}-hair-${selection.hairCostume3dId}`;
   manifest.displayName = `Head ${selection.headCostume3dId} / Hair ${selection.hairCostume3dId}`;
   manifest.characterId = String(selection.characterId).padStart(2, "0");
+  manifest.source ||= { bundleRoot: "", manifestUrl: "", meshUrl: "" };
+  manifest.rawImportOffset = normalizeVec3(manifest.rawImportOffset, { x: 0, y: 0, z: 0 });
+  manifest.assembly ||= {} as HeadAssetManifest["assembly"];
+  manifest.assembly.attachOrigin ||= { fallbackPosition: { x: 0, y: 1.75, z: 0.15 } };
+  manifest.assembly.attachOrigin.fallbackPosition = normalizeVec3(
+    manifest.assembly.attachOrigin.fallbackPosition,
+    { x: 0, y: 1.75, z: 0.15 }
+  );
+  manifest.faceMaterials ||= [];
+  const resolveHeadUrl = createPartUrlResolver(head, resolveUrl);
   manifest.source = {
     ...manifest.source,
-    meshUrl: resolveRequiredUrl(manifest.source?.meshUrl, resolveUrl),
-    skeletonUrl: resolveMaybeUrl(manifest.source?.skeletonUrl, resolveUrl),
-    animationUrls: manifest.source?.animationUrls?.map((url) => resolveRequiredUrl(url, resolveUrl)),
+    meshUrl: resolveRequiredUrl(manifest.source?.meshUrl, resolveHeadUrl),
+    skeletonUrl: resolveMaybeUrl(manifest.source?.skeletonUrl, resolveHeadUrl),
+    animationUrls: manifest.source?.animationUrls?.map((url) => resolveRequiredUrl(url, resolveHeadUrl)),
   };
   manifest.faceMaterials = mergeMaterialSlots(manifest.faceMaterials, runtimes);
   manifest.morphChannelBindings = runtimes.flatMap((runtime) =>
     Array.isArray(runtime.morphChannelBindings) ? runtime.morphChannelBindings : []
   ) as HeadAssetManifest["morphChannelBindings"];
   return manifest;
+}
+
+function createPartUrlResolver(
+  runtime: PartRuntimePackage,
+  resolveUrl: (path: string) => string
+) {
+  const packagePath = readOptionalString(runtime.mount?.packagePath) || "";
+  return (path: string) => resolveUrl(resolvePackageRelativePath(packagePath, path));
+}
+
+function resolvePackageRelativePath(packagePath: string, path: string) {
+  if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith("/")) {
+    return path;
+  }
+  const normalizedPackagePath = packagePath.replace(/\/+$/, "");
+  if (!normalizedPackagePath || path.startsWith(`${normalizedPackagePath}/`)) {
+    return path;
+  }
+  return `${normalizedPackagePath}/${path.replace(/^\/+/, "")}`;
+}
+
+function normalizeVec3(
+  value: { x?: number; y?: number; z?: number } | undefined,
+  fallback: { x: number; y: number; z: number }
+) {
+  return {
+    x: typeof value?.x === "number" ? value.x : fallback.x,
+    y: typeof value?.y === "number" ? value.y : fallback.y,
+    z: typeof value?.z === "number" ? value.z : fallback.z,
+  };
+}
+
+function readOptionalString(value: unknown) {
+  return typeof value === "string" ? value : "";
 }
 
 function composeRuntimeExtension(

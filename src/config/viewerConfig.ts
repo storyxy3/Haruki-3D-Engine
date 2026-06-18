@@ -63,7 +63,7 @@ export const defaultRenderState: ViewerRenderState = {
   characterYawMode: "0",
   faceMotionEnabled: true,
   bodyHeadTracksEnabled: true,
-  springRuntimeMode: "off",
+  springRuntimeMode: "unity-prefab",
 };
 
 export const defaultAnimationState: ViewerAnimationState = {

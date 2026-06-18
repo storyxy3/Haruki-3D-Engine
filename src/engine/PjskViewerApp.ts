@@ -40,6 +40,17 @@ import type { SpringRuntimeMode } from "../config/viewerConfig";
 const NECK_CONTACT_SHADOW_STRENGTH = 0.0;
 const DEFAULT_CAMERA_TARGET_SCALE = new THREE.Vector3(0.04835, 0.48222, 0.07241);
 const DEFAULT_CAMERA_OFFSET_SCALE = new THREE.Vector3(-0.08532, 0.12848, 1.93551);
+const ID5_DEBUG_CAMERA_TARGET_SCALE = new THREE.Vector3(
+  -0.032911392405063286,
+  0.4893037974683544,
+  0.06841772151898734
+);
+const ID5_DEBUG_CAMERA_OFFSET_SCALE = new THREE.Vector3(
+  -0.08468354430379746,
+  0.270253164556962,
+  1.920886075949367
+);
+const ID5_DEBUG_CAMERA_LATERAL_SHIFT_SCALE = -0.0245;
 const CHARACTER_EYE_STENCIL_BIT = 0x01;
 const CHARACTER_EYELASH_STENCIL_BIT = 0x02;
 const CHARACTER_EYEBROW_STENCIL_BIT = 0x04;
@@ -3324,7 +3335,7 @@ export class PjskViewerApp {
   private animationPaused = false;
   private faceMotionEnabled = true;
   private bodyHeadTracksEnabled = true;
-  private springRuntimeMode: SpringRuntimeMode = "off";
+  private springRuntimeMode: SpringRuntimeMode = "unity-prefab";
   private animationRevision = 0;
   private characterHeight = 1;
   private readonly tempMatrixA = new THREE.Matrix4();
@@ -4923,6 +4934,39 @@ export class PjskViewerApp {
     this.controls.target.copy(getDefaultCameraTarget(nextHeight));
     this.camera.position.copy(getDefaultCameraPosition(nextHeight));
     this.controls.update();
+  }
+
+  applyCameraPreset(preset: "default" | "id5-debug") {
+    const targetScale =
+      preset === "id5-debug"
+        ? ID5_DEBUG_CAMERA_TARGET_SCALE
+        : DEFAULT_CAMERA_TARGET_SCALE;
+    const offsetScale =
+      preset === "id5-debug"
+        ? ID5_DEBUG_CAMERA_OFFSET_SCALE
+        : DEFAULT_CAMERA_OFFSET_SCALE;
+    const target = targetScale.clone().multiplyScalar(this.characterHeight);
+    const offset = offsetScale.clone().multiplyScalar(this.characterHeight);
+    this.controls.target.copy(target);
+    this.camera.position.copy(target).add(offset);
+    this.controls.update();
+    this.cameraDebugChangeCallback?.();
+  }
+
+  shiftCameraRight(amount = 1) {
+    if (!Number.isFinite(amount) || amount === 0) {
+      return;
+    }
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const forward = this.controls.target.clone().sub(this.camera.position).normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+    const shift = right.multiplyScalar(ID5_DEBUG_CAMERA_LATERAL_SHIFT_SCALE * amount * this.characterHeight);
+    this.controls.target.add(shift);
+    this.camera.position.add(shift);
+    this.controls.update();
+    this.cameraDebugChangeCallback?.();
+    void offset;
   }
 
   private makeImportStatus(

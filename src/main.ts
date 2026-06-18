@@ -26,6 +26,7 @@ import {
   type RenderIsolationMode,
   type RuntimeCombinedCharacterAsset,
   type SpringBoneRuntimeSnapshot,
+  type RuntimeCameraDebug,
 } from "./engine/PjskViewerApp";
 import {
   characterYawDegreesByMode,
@@ -43,6 +44,7 @@ import {
   getCharacterIndexEntries,
   getDefaultCustomSelection,
   listSelectableParts,
+  normalizeRuntimePartType,
   type Character3dIndex,
   type CustomPartSelection,
   type HeadHairCompatibility,
@@ -294,6 +296,13 @@ root.innerHTML = `
         <h2>SpringBone Metadata</h2>
         <div id="springbone-status" class="callout">
           Waiting for PJSK springBone metadata.
+        </div>
+      </section>
+
+      <section class="group controls">
+        <h2>Camera Debug</h2>
+        <div id="camera-debug-status" class="callout">
+          Waiting for camera state.
         </div>
       </section>
 
@@ -1254,7 +1263,7 @@ function resetRuntimePackageState() {
 }
 
 async function parsePartRegistryFolder(files: File[], registryFile: File) {
-  const registry = await parseJsonFile<PartRegistryEntry[]>(registryFile);
+  const registry = normalizePartRegistry(await parseJsonFile<PartRegistryInput>(registryFile));
   const characterIndexFile = files.find((file) =>
     /(?:^|\/)character3d-index\.json$/i.test(getNormalizedRelativePath(file))
   );
@@ -1282,9 +1291,9 @@ async function parsePartRegistryFolder(files: File[], registryFile: File) {
 }
 
 async function parsePartRegistryBaseUrl(baseUrl: string) {
-  const registry = await fetchRuntimeJson(
+  const registry = normalizePartRegistry(await fetchRuntimeJson(
     resolveConverterBaseUrl(baseUrl, "parts/part-registry.json")
-  ) as PartRegistryEntry[];
+  ) as PartRegistryInput);
   const characterIndex = await fetchOptionalJson<Character3dIndex>(
     resolveConverterBaseUrl(baseUrl, "character3d-index.json")
   );
@@ -1292,12 +1301,31 @@ async function parsePartRegistryBaseUrl(baseUrl: string) {
     resolveConverterBaseUrl(baseUrl, "parts/head-hair-compatibility.json")
   );
   const packages = new Map<string, PartRuntimePackage>();
-  await Promise.all(registry.map(async (entry) => {
-    const runtime = await fetchRuntimeJson(
-      resolveConverterBaseUrl(baseUrl, `${entry.packagePath}/part-runtime.json`)
-    ) as PartRuntimePackage;
-    packages.set(entry.packagePath, runtime);
-  }));
+  const candidates = selectPartRuntimeCandidates(registry, characterIndex, compatibility);
+  const batchSize = 24;
+  const maxCandidates = 720;
+  for (let offset = 0; offset < Math.min(candidates.length, maxCandidates); offset += batchSize) {
+    const batch = candidates.slice(offset, offset + batchSize);
+    const results = await Promise.all(batch.map(async (entry) => ({
+      entry,
+      runtime: await fetchOptionalJson<PartRuntimePackage>(
+        resolveConverterBaseUrl(baseUrl, `${entry.packagePath}/part-runtime.json`)
+      ),
+    })));
+    for (const result of results) {
+      if (result.runtime) {
+        packages.set(result.entry.packagePath, result.runtime);
+      }
+    }
+    if (hasUsableCustomPartSelection(registry, characterIndex, compatibility, packages, baseUrl)) {
+      break;
+    }
+  }
+  if (!hasUsableCustomPartSelection(registry, characterIndex, compatibility, packages, baseUrl)) {
+    throw new Error(
+      `Part registry package did not expose a compatible loaded body/head/hair selection from ${baseUrl}.`
+    );
+  }
   return buildPartPackageSet(
     registry,
     characterIndex ? getCharacterIndexEntries(characterIndex) : [],
@@ -1321,6 +1349,219 @@ function buildPartPackageSet(
     packages,
     baseUrl,
   };
+}
+
+function selectPartRuntimeCandidates(
+  registry: PartRegistryEntry[],
+  characterIndex: Character3dIndex | null,
+  compatibility: HeadHairCompatibility | null
+) {
+  const indexEntries = characterIndex ? getCharacterIndexEntries(characterIndex) : [];
+  const preferredCharacterId = indexEntries.find((entry) =>
+    typeof entry.characterId === "number"
+  )?.characterId ?? registry.find((entry) => entry.status !== "missing")?.characterId ?? null;
+  const ordered: PartRegistryEntry[] = [];
+  const seen = new Set<string>();
+  const addEntry = (entry: PartRegistryEntry | undefined) => {
+    if (!entry || entry.status === "missing") {
+      return;
+    }
+    const key = `${entry.characterId}|${entry.partType}|${entry.costume3dId}|${entry.packagePath}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    ordered.push(entry);
+  };
+  const findRegistryEntry = (
+    characterId: number,
+    partType: RuntimePartType,
+    costume3dId: number,
+    unit?: string | null
+  ) => registry.find((entry) =>
+    entry.characterId === characterId &&
+    entry.costume3dId === costume3dId &&
+    normalizeRuntimePartType(entry.partType) === partType &&
+    (unit === undefined || entry.unit === unit) &&
+    entry.status !== "missing"
+  );
+  const deniedHeadHairKeys = buildDeniedHeadHairKeys(compatibility);
+
+  if (preferredCharacterId !== null) {
+    for (const entry of indexEntries) {
+      if (entry.characterId !== preferredCharacterId) {
+        continue;
+      }
+      if (typeof entry.bodyCostume3dId === "number") {
+        addEntry(findRegistryEntry(entry.characterId, "body", entry.bodyCostume3dId, entry.unit));
+      }
+      if (typeof entry.headCostume3dId === "number") {
+        addEntry(findRegistryEntry(entry.characterId, "head", entry.headCostume3dId, entry.unit));
+      }
+      if (typeof entry.hairCostume3dId === "number") {
+        addEntry(findRegistryEntry(entry.characterId, "hair", entry.hairCostume3dId, entry.unit));
+      }
+      if (typeof entry.headOptionalCostume3dId === "number") {
+        addEntry(findRegistryEntry(entry.characterId, "head_optional", entry.headOptionalCostume3dId, entry.unit));
+      }
+    }
+
+    const defaultBody = registry
+      .filter((entry) =>
+        entry.characterId === preferredCharacterId &&
+        normalizeRuntimePartType(entry.partType) === "body" &&
+        entry.status !== "missing"
+      )
+      .sort((left, right) => left.costume3dId - right.costume3dId)[0];
+    addEntry(defaultBody);
+
+    const sameCharacterHeads = registry
+      .filter((entry) =>
+        entry.characterId === preferredCharacterId &&
+        normalizeRuntimePartType(entry.partType) === "head" &&
+        entry.status !== "missing"
+      )
+      .sort((left, right) => left.costume3dId - right.costume3dId);
+    const sameCharacterHairs = registry
+      .filter((entry) =>
+        entry.characterId === preferredCharacterId &&
+        normalizeRuntimePartType(entry.partType) === "hair" &&
+        entry.status !== "missing"
+      )
+      .sort((left, right) => left.costume3dId - right.costume3dId);
+    for (const head of sameCharacterHeads) {
+      for (const hair of sameCharacterHairs) {
+        if (deniedHeadHairKeys.has(headHairCandidateKey(head.unit ?? hair.unit, head.costume3dId, hair.costume3dId))) {
+          continue;
+        }
+        addEntry(head);
+        addEntry(hair);
+      }
+    }
+
+    for (const entry of registry) {
+      if (
+        entry.characterId === preferredCharacterId &&
+        entry.status !== "missing" &&
+        (normalizeRuntimePartType(entry.partType) === "head" || normalizeRuntimePartType(entry.partType) === "hair")
+      ) {
+        addEntry(entry);
+      }
+    }
+  }
+  const preferredCostumeIds = new Set<number>();
+  for (const entry of indexEntries) {
+    if (preferredCharacterId !== null && entry.characterId !== preferredCharacterId) {
+      continue;
+    }
+    for (const id of [
+      entry.bodyCostume3dId,
+      entry.headCostume3dId,
+      entry.hairCostume3dId,
+      entry.headOptionalCostume3dId,
+    ]) {
+      if (typeof id === "number") {
+        preferredCostumeIds.add(id);
+      }
+    }
+  }
+
+  const scored = registry
+    .filter((entry) => entry.status !== "missing")
+    .filter((entry) => {
+      const key = `${entry.characterId}|${entry.partType}|${entry.costume3dId}|${entry.packagePath}`;
+      return !seen.has(key);
+    })
+    .map((entry, index) => ({
+      entry,
+      index,
+      score:
+        (preferredCharacterId !== null && entry.characterId === preferredCharacterId ? 0 : 1000000) +
+        (preferredCostumeIds.has(entry.costume3dId) ? 0 : 10000) +
+        partTypePriority(entry.partType) +
+        Math.min(entry.costume3dId, 9999),
+    }))
+    .sort((left, right) => left.score - right.score || left.index - right.index);
+  return [...ordered, ...scored.map((item) => item.entry)];
+}
+
+function buildDeniedHeadHairKeys(compatibility: HeadHairCompatibility | null) {
+  const keys = new Set<string>();
+  if (!compatibility) {
+    return keys;
+  }
+  for (const entry of compatibility.denied ?? []) {
+    keys.add(headHairCandidateKey(entry.unit, entry.headCostume3dId, entry.hairCostume3dId));
+  }
+  for (const entry of compatibility.rules ?? []) {
+    if (entry.state !== "not_available") {
+      continue;
+    }
+    keys.add(headHairCandidateKey(entry.unit, entry.headCostume3dId, entry.hairCostume3dId));
+  }
+  return keys;
+}
+
+function headHairCandidateKey(
+  unit: string | null | undefined,
+  headCostume3dId: number,
+  hairCostume3dId: number
+) {
+  return `${unit ?? ""}|${headCostume3dId}|${hairCostume3dId}`;
+}
+
+function partTypePriority(partType: string) {
+  switch (partType) {
+    case "body":
+      return 0;
+    case "head":
+      return 100;
+    case "hair":
+      return 200;
+    case "head_optional":
+      return 300;
+    default:
+      return 1000;
+  }
+}
+
+function hasMinimumCustomPartPackages(packages: Map<string, PartRuntimePackage>) {
+  const loadedTypes = new Set(
+    [...packages.values()].map((runtime) => runtime.part.partType)
+  );
+  return loadedTypes.has("body") && loadedTypes.has("head") && loadedTypes.has("hair");
+}
+
+function hasUsableCustomPartSelection(
+  registry: PartRegistryEntry[],
+  characterIndex: Character3dIndex | null,
+  compatibility: HeadHairCompatibility | null,
+  packages: Map<string, PartRuntimePackage>,
+  baseUrl: string
+) {
+  if (!hasMinimumCustomPartPackages(packages)) {
+    return false;
+  }
+  const partSet = buildPartPackageSet(
+    registry,
+    characterIndex ? getCharacterIndexEntries(characterIndex) : [],
+    compatibility,
+    packages,
+    baseUrl
+  );
+  return Boolean(getDefaultCustomSelection(partSet));
+}
+
+type PartRegistryInput = PartRegistryEntry[] | {
+  entries?: PartRegistryEntry[];
+  parts?: PartRegistryEntry[];
+};
+
+function normalizePartRegistry(input: PartRegistryInput): PartRegistryEntry[] {
+  if (Array.isArray(input)) {
+    return input;
+  }
+  return input.entries ?? input.parts ?? [];
 }
 
 async function parseJsonFile<T>(file: File): Promise<T> {
@@ -1497,7 +1738,10 @@ async function fetchRuntimeJson(url: string) {
   return response.json();
 }
 
-async function parseConverterBaseUrl(baseUrl: string) {
+async function parseConverterBaseUrl(
+  baseUrl: string,
+  options: { fullRuntimeOnly?: boolean } = {}
+) {
   localAssetState.converterFiles = [];
   for (const url of new Set(localAssetState.converterUrlByPath.values())) {
     URL.revokeObjectURL(url);
@@ -1508,21 +1752,37 @@ async function parseConverterBaseUrl(baseUrl: string) {
   localAssetState.converterBaseUrl = baseUrl;
   applyLightControllerPreview(null);
   localAssetState.converterError = "";
+  let partRegistryError: unknown = null;
 
   try {
-    try {
-      activatePartPackageSet(await parsePartRegistryBaseUrl(baseUrl));
-      return;
-    } catch {
-      resetRuntimePackageState();
-      localAssetState.converterBaseUrl = baseUrl;
+    if (!options.fullRuntimeOnly) {
+      try {
+        activatePartPackageSet(await parsePartRegistryBaseUrl(baseUrl));
+        return;
+      } catch (error) {
+        partRegistryError = error;
+        resetRuntimePackageState();
+        localAssetState.converterBaseUrl = baseUrl;
+      }
     }
 
     const runtimeUrl = resolveConverterBaseUrl(
       baseUrl,
       "pjsk-sekai-runtime.extension.json"
     );
-    const baseRuntimeExtension = asRecord(await fetchRuntimeJson(runtimeUrl));
+    let baseRuntimeExtension: UnknownRecord;
+    try {
+      baseRuntimeExtension = asRecord(await fetchRuntimeJson(runtimeUrl));
+    } catch (error) {
+      if (partRegistryError) {
+        const registryMessage = partRegistryError instanceof Error
+          ? partRegistryError.message
+          : String(partRegistryError);
+        const runtimeMessage = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to load part registry package: ${registryMessage}. Full runtime fallback also failed: ${runtimeMessage}`);
+      }
+      throw error;
+    }
     const unityRuntimeJsonPath = readUnityRuntimeJsonPath(baseRuntimeExtension);
     const unityRuntimeJsonUrl = unityRuntimeJsonPath
       ? resolveConverterBaseUrl(baseUrl, unityRuntimeJsonPath)
@@ -2044,6 +2304,31 @@ function renderSpringBoneStatus(loading = false) {
     `SpringBone metadata | Body Managers ${snapshot.bodyManagerCount}, Bones ${snapshot.bodySpringBoneCount}, ExtraBone ${snapshot.bodyExtraBoneCount}, Colliders S${snapshot.bodySphereColliderCount}/C${snapshot.bodyCapsuleColliderCount}/P${snapshot.bodyPanelColliderCount} | Head Managers ${snapshot.headManagerCount}, Bones ${snapshot.headSpringBoneCount}, ExtraBone ${snapshot.headExtraBoneCount}, Colliders S${snapshot.headSphereColliderCount}/C${snapshot.headCapsuleColliderCount}/P${snapshot.headPanelColliderCount} | CharacterHair ${snapshot.characterHairPresent ? "yes" : "no"} | CharacterEye ${snapshot.characterEyePresent ? "yes" : "no"} | VRM Manager ${snapshot.vrmSpringBoneManagerPresent ? "yes" : "no"}${runtime}`;
 }
 
+function formatCameraVector(vector: RuntimeCameraDebug["position"]): string {
+  return `${vector.x.toFixed(4)}, ${vector.y.toFixed(4)}, ${vector.z.toFixed(4)}`;
+}
+
+function renderCameraDebugStatus() {
+  const status = document.querySelector<HTMLElement>("#camera-debug-status");
+  if (!status) {
+    return;
+  }
+
+  const camera = viewer.getCameraDebugSnapshot();
+  status.textContent =
+    `Position ${formatCameraVector(camera.position)} | ` +
+    `Target ${formatCameraVector(camera.target)} | ` +
+    `Offset ${formatCameraVector(camera.offset)} | ` +
+    `Distance ${camera.distance.toFixed(4)} | ` +
+    `Polar ${camera.polarDegrees.toFixed(3)} deg | ` +
+    `Azimuth ${camera.azimuthDegrees.toFixed(3)} deg | ` +
+    `FOV ${camera.fovDegrees.toFixed(3)} deg | ` +
+    `Aspect ${camera.aspect.toFixed(4)} | ` +
+    `Zoom ${camera.zoom.toFixed(4)} | ` +
+    `Polar Range ${camera.minPolarDegrees.toFixed(3)}-${camera.maxPolarDegrees.toFixed(3)} deg | ` +
+    `Character Height ${camera.characterHeight.toFixed(4)}`;
+}
+
 function formatSpringRuntimeSetupSummary(
   runtime: NonNullable<SpringBoneRuntimeSnapshot["utjRuntime"]>
 ): string {
@@ -2477,10 +2762,12 @@ async function applyCharacterImport() {
 viewer.updatePreviewLight(previewState);
 renderAnimationControls();
 renderSpringBoneStatus();
+renderCameraDebugStatus();
 renderCustomPartControls();
 
 type CaptureConfig = {
   baseUrl: string;
+  fullRuntimeOnly: boolean;
   phase: number;
   clip: "motion" | "motion_loop";
   warmupMs: number;
@@ -2489,6 +2776,7 @@ type CaptureConfig = {
   bodyDebugMode: BodyDebugMode;
   renderIsolation: RenderIsolationMode;
   springRuntimeMode: SpringRuntimeMode;
+  cameraPreset: "default" | "id5-debug";
   utjTraceBones: string[];
   utjTraceMaxEvents: number;
 };
@@ -2526,6 +2814,7 @@ function readCaptureConfig(): CaptureConfig | null {
   const bodyDebugMode = readBodyDebugMode(params);
   const renderIsolation = readRenderIsolationMode(params);
   const springRuntimeMode = readSpringRuntimeMode(params);
+  const cameraPreset = readCameraPreset(params);
   const utjTraceBones = params
     .getAll("utjTraceBone")
     .flatMap((value) => value.split(","))
@@ -2538,9 +2827,11 @@ function readCaptureConfig(): CaptureConfig | null {
   viewer.setBodyDebugMode(bodyDebugMode);
   viewer.setRenderIsolationMode(renderIsolation);
   viewer.setHairShadowMode(renderState.hairShadowMode);
+  viewer.applyCameraPreset(cameraPreset);
 
   return {
     baseUrl,
+    fullRuntimeOnly: params.get("captureFullRuntimeOnly") === "true",
     phase: THREE.MathUtils.clamp(Number.isFinite(phase) ? phase : 0.5, 0, 1),
     clip,
     warmupMs: Math.max(Math.trunc(Number.isFinite(warmupMs) ? warmupMs : 0), 0),
@@ -2549,6 +2840,7 @@ function readCaptureConfig(): CaptureConfig | null {
     bodyDebugMode,
     renderIsolation,
     springRuntimeMode,
+    cameraPreset,
     utjTraceBones,
     utjTraceMaxEvents: Math.max(Math.trunc(Number.isFinite(traceMaxEvents) ? traceMaxEvents : 240), 1),
   };
@@ -2627,10 +2919,17 @@ function readSpringRuntimeMode(params: URLSearchParams): SpringRuntimeMode {
   if (mode === "unity-prefab") {
     return mode;
   }
+  if (mode === "off") {
+    return mode;
+  }
   if (mode === "webgl-utj" || params.get("utjSpringBoneEnabled") === "true") {
     return "unity-prefab";
   }
-  return "off";
+  return "unity-prefab";
+}
+
+function readCameraPreset(params: URLSearchParams): "default" | "id5-debug" {
+  return params.get("cameraPreset") === "default" ? "default" : "id5-debug";
 }
 
 function setCaptureError(error: unknown) {
@@ -2684,6 +2983,8 @@ async function prepareCaptureFrame(config: CaptureConfig) {
   renderImportSummary();
   renderAnimationControls();
   renderSpringBoneStatus();
+  viewer.applyCameraPreset(config.cameraPreset);
+  viewer.shiftCameraRight(1);
   await waitForAnimationFrames(3);
   lastSpringBoneSnapshot = viewer.getSpringBoneSnapshot();
   const captureWindow = getCaptureWindow();
@@ -2693,6 +2994,7 @@ async function prepareCaptureFrame(config: CaptureConfig) {
     springRuntimeMode: config.springRuntimeMode,
     bodyDebugMode: config.bodyDebugMode,
     renderIsolation: config.renderIsolation,
+    cameraPreset: config.cameraPreset,
     import: lastImportSnapshot,
     animation: lastAnimationSnapshot,
     faceMotion: lastFaceMotionSnapshot,
@@ -2715,7 +3017,9 @@ async function bootstrapApp() {
     getCaptureWindow().__PJSK_CAPTURE_READY__ = false;
     document.body.dataset.captureReady = "false";
     animationState.paused = true;
-    await parseConverterBaseUrl(captureConfig.baseUrl);
+    await parseConverterBaseUrl(captureConfig.baseUrl, {
+      fullRuntimeOnly: captureConfig.fullRuntimeOnly,
+    });
     if (localAssetState.converterError) {
       throw new Error(localAssetState.converterError);
     }
@@ -2948,3 +3252,6 @@ animationSeek?.addEventListener("input", () => {
   renderAnimationControls();
   renderSpringBoneStatus();
 });
+
+viewer.onCameraDebugChange(renderCameraDebugStatus);
+window.addEventListener("resize", renderCameraDebugStatus);
