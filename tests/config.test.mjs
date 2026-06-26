@@ -11,6 +11,8 @@ import {
   resolveCaptureServerOptions,
 } from "../config/haruki-3d-engine-config.mjs";
 
+const repoRoot = path.resolve(import.meta.dirname, "..");
+
 test("loads engine config JSON and applies capture runtime CLI overrides", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "haruki-engine-config-test-"));
   const configPath = path.join(dir, "engine.config.json");
@@ -51,6 +53,35 @@ test("loads engine config JSON and applies capture runtime CLI overrides", () =>
   assert.equal(server.runtimeRoot, "/data/runtime-from-config");
   assert.equal(server.captureOutputDir, "/data/captures-from-config");
   assert.equal(server.port, 18080);
+});
+
+test("experimental neck contact shadow cannot be enabled in production shading", () => {
+  const engineSource = fs.readFileSync(
+    path.join(repoRoot, "src/engine/Haruki3DEngine.ts"),
+    "utf8"
+  );
+  const shaderSource = fs.readFileSync(
+    path.join(repoRoot, "src/materials/sekaiCharacterShader.ts"),
+    "utf8"
+  );
+
+  assert.match(engineSource, /const NECK_CONTACT_SHADOW_STRENGTH = 0\.0;/);
+  assert.match(
+    engineSource,
+    /if \(this\.bodyDebugMode === "off" && NECK_CONTACT_SHADOW_STRENGTH <= 0\.0\) \{\s+return;\s+\}/
+  );
+  assert.match(
+    shaderSource,
+    /Experimental neck\/contact shadow is kept debuggable but disabled until its data path is complete\./
+  );
+  assert.doesNotMatch(
+    shaderSource,
+    /shadowBand\s*=\s*(?:max|mix)\([^;]*uNeckContactStrength/s
+  );
+  assert.match(
+    shaderSource,
+    /material\.uniforms\.uNeckContactStrength\.value = 0\.0;/
+  );
 });
 
 test("capture runtime parser allows config to replace built-in defaults", () => {
