@@ -7,6 +7,7 @@ import {
   type PjskCameraPreset,
   type RenderIsolationMode,
 } from "./index";
+import type { CustomPartSelection } from "./parts/runtimePartComposer";
 import {
   characterYawDegreesByMode,
   type CharacterYawMode,
@@ -53,9 +54,49 @@ const engine = new Haruki3DEngine({
   autoRender: false,
   manageResize: false,
 });
+let loadedRuntimeBaseUrl: string | null = null;
+let loadedRuntimeFullRuntimeOnly = false;
+let loadedRuntimePreferredSelectionKey: string | null = null;
 
 function getCaptureWindow() {
   return window as CaptureWindow;
+}
+
+async function ensureRuntimePackageLoaded(
+  baseUrl = "/runtime/",
+  fullRuntimeOnly = false,
+  preferredSelection?: CustomPartSelection
+) {
+  const preferredSelectionKey = makePreferredSelectionKey(preferredSelection);
+  if (
+    loadedRuntimeBaseUrl === baseUrl &&
+    loadedRuntimeFullRuntimeOnly === fullRuntimeOnly &&
+    loadedRuntimePreferredSelectionKey === preferredSelectionKey
+  ) {
+    return;
+  }
+  await engine.loadRuntimePackage({
+    baseUrl,
+    fullRuntimeOnly,
+    preferredSelection,
+  });
+  loadedRuntimeBaseUrl = baseUrl;
+  loadedRuntimeFullRuntimeOnly = fullRuntimeOnly;
+  loadedRuntimePreferredSelectionKey = preferredSelectionKey;
+}
+
+function makePreferredSelectionKey(selection: CustomPartSelection | undefined) {
+  if (!selection) {
+    return "";
+  }
+  return [
+    selection.characterId,
+    selection.unit ?? "",
+    selection.bodyCostume3dId,
+    selection.headCostume3dId,
+    selection.hairCostume3dId,
+    selection.headOptionalCostume3dId ?? "",
+  ].join("|");
 }
 
 function readCaptureConfig(): CaptureConfig | null {
@@ -200,6 +241,11 @@ getCaptureWindow().__HARUKI_CAPTURE_REQUEST__ = async (
     document.body.dataset.captureReady = "false";
     document.body.dataset.captureError = "";
     engine.setViewportSize(root.clientWidth, root.clientHeight);
+    await ensureRuntimePackageLoaded(
+      "/runtime/",
+      false,
+      readPreferredSelectionFromCaptureRequest(request)
+    );
     const result = await engine.captureRoleParts({
       ...request,
       phase: request.phase ?? 0.5,
@@ -214,6 +260,25 @@ getCaptureWindow().__HARUKI_CAPTURE_REQUEST__ = async (
     throw error;
   }
 };
+
+function readPreferredSelectionFromCaptureRequest(
+  request: HarukiCaptureRolePartsRequest
+): CustomPartSelection | undefined {
+  const [characterIdText, unitText = ""] = request.roleId.split(":");
+  const characterId = Number(characterIdText);
+  if (!Number.isFinite(characterId)) {
+    return undefined;
+  }
+  return {
+    characterId,
+    unit: unitText || null,
+    bodyCostume3dId: request.bodyCostume3dId,
+    headCostume3dId: request.headCostume3dId,
+    hairCostume3dId: request.hairCostume3dId,
+    headOptionalCostume3dId: request.headOptionalCostume3dId ?? null,
+    origin: "custom",
+  };
+}
 
 function waitForAnimationFrames(count: number) {
   return new Promise<void>((resolve) => {
@@ -279,6 +344,8 @@ async function prepareCaptureFrame(config: CaptureConfig) {
 async function bootstrapCapture() {
   const config = readCaptureConfig();
   if (!config) {
+    getCaptureWindow().__PJSK_CAPTURE_READY__ = true;
+    document.body.dataset.captureReady = "true";
     return;
   }
   try {
@@ -296,10 +363,7 @@ async function bootstrapCapture() {
       config.utjTraceBones,
       config.utjTraceMaxEvents
     );
-    await engine.loadRuntimePackage({
-      baseUrl: config.baseUrl,
-      fullRuntimeOnly: config.fullRuntimeOnly,
-    });
+    await ensureRuntimePackageLoaded(config.baseUrl, config.fullRuntimeOnly);
     await prepareCaptureFrame(config);
   } catch (error) {
     setCaptureError(error);

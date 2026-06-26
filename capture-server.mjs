@@ -437,10 +437,13 @@ class CaptureRuntimeSession {
     this.chromiumLog = "";
     this.tempRoot = makeTempDir();
     const debugPort = await getFreePort();
-    const pageUrl = `http://127.0.0.1:${port}/capture.html?captureBase=/runtime/&capturePhase=0.5&captureClip=motion_loop&springRuntimeMode=unity-prefab&cameraPreset=id5-debug`;
+    const pageUrl = `http://127.0.0.1:${port}/capture.html`;
     this.chromium = spawn(chromiumPath, [
       "--headless=new",
-      "--disable-gpu",
+      "--use-gl=swiftshader",
+      "--use-angle=swiftshader",
+      "--enable-unsafe-swiftshader",
+      "--disable-vulkan",
       "--hide-scrollbars",
       "--no-first-run",
       "--no-default-browser-check",
