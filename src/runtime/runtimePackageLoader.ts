@@ -215,7 +215,10 @@ async function loadPartPackageSetFromBaseUrl(
     })));
     for (const result of results) {
       if (result.runtime) {
-        packages.set(result.entry.packagePath, result.runtime);
+        packages.set(
+          result.entry.packagePath,
+          withPartRuntimePackagePath(result.runtime, result.entry)
+        );
       }
     }
     if (hasUsableCustomPartSelection(registry, characterIndex, compatibility, packages, baseUrl)) {
@@ -355,8 +358,23 @@ async function loadPartRuntimePackage(
   const runtime = await fetchRuntimeJson(
     resolveRuntimePackageUrl(baseUrl, `${entry.packagePath}/part-runtime.json`)
   ) as PartRuntimePackage;
-  partSet.packages.set(entry.packagePath, runtime);
-  return runtime;
+  const normalized = withPartRuntimePackagePath(runtime, entry);
+  partSet.packages.set(entry.packagePath, normalized);
+  return normalized;
+}
+
+function withPartRuntimePackagePath(
+  runtime: PartRuntimePackage,
+  entry: PartRegistryEntry
+): PartRuntimePackage {
+  return {
+    ...runtime,
+    packagePath: entry.packagePath,
+    mount: {
+      ...(runtime.mount ?? {}),
+      packagePath: entry.packagePath,
+    },
+  };
 }
 
 async function fetchRuntimeJson(url: string) {

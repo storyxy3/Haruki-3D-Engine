@@ -58,6 +58,7 @@ export type HeadHairCompatibility = {
 
 export type PartRuntimePackage = {
   version: string;
+  packagePath?: string;
   part: {
     costume3dId: number;
     partType: RuntimePartType | string;
@@ -556,7 +557,7 @@ function normalizeBodyManifestFromPart(
     skeletonUrl: resolveMaybeUrl(manifest.source?.skeletonUrl, resolvePartUrl),
     animationUrls: manifest.source?.animationUrls?.map((url) => resolveRequiredUrl(url, resolvePartUrl)),
   };
-  manifest.bodyMaterials = mergeMaterialSlots(manifest.bodyMaterials, [runtime]);
+  manifest.bodyMaterials = mergeMaterialSlots(manifest.bodyMaterials, [runtime], resolveUrl);
   return manifest;
 }
 
@@ -613,7 +614,7 @@ function normalizeHeadManifestFromParts(
     skeletonUrl: resolveMaybeUrl(manifest.source?.skeletonUrl, resolveHeadUrl),
     animationUrls: manifest.source?.animationUrls?.map((url) => resolveRequiredUrl(url, resolveHeadUrl)),
   };
-  manifest.faceMaterials = mergeMaterialSlots(manifest.faceMaterials, runtimes);
+  manifest.faceMaterials = mergeMaterialSlots(manifest.faceMaterials, runtimes, resolveUrl);
   manifest.morphChannelBindings = runtimes.flatMap((runtime) =>
     Array.isArray(runtime.morphChannelBindings) ? runtime.morphChannelBindings : []
   ) as HeadAssetManifest["morphChannelBindings"];
@@ -624,7 +625,7 @@ function createPartUrlResolver(
   runtime: PartRuntimePackage,
   resolveUrl: (path: string) => string
 ) {
-  const packagePath = readOptionalString(runtime.mount?.packagePath) || "";
+  const packagePath = readOptionalString(runtime.packagePath) || readOptionalString(runtime.mount?.packagePath) || "";
   return (path: string) => resolveUrl(resolvePackageRelativePath(packagePath, path));
 }
 
@@ -687,6 +688,9 @@ function composeRuntimeExtension(
 function mergeRuntimeSetup(runtimes: PartRuntimePackage[]): RuntimeSetup {
   const remappedParts = runtimes.map((runtime, partIndex) => remapRuntimePart(runtime, partIndex));
   const firstSetup = remappedParts[0]?.setup ?? {};
+  const prefabGraphs = remappedParts
+    .map((part) => part.runtime.springBone?.prefabGraph)
+    .filter((value) => value !== undefined);
   const warnings = runtimes.flatMap((runtime) => [
     ...(runtime.warnings ?? []),
     ...((runtime.springBone?.warnings as string[] | undefined) ?? []),
@@ -701,9 +705,8 @@ function mergeRuntimeSetup(runtimes: PartRuntimePackage[]): RuntimeSetup {
   return {
     ...firstSetup,
     version: "0414",
-    prefabGraphs: remappedParts
-      .map((part) => part.runtime.springBone?.prefabGraph)
-      .filter((value) => value !== undefined),
+    prefabGraphs,
+    bodyHeadAssembly: firstSetup.bodyHeadAssembly ?? resolveComposedBodyHeadAssembly(prefabGraphs),
     rootSelectionProfile: {
       policy: "viewer_composed_active_parts",
       rootCandidates: [],
@@ -734,6 +737,42 @@ function mergeRuntimeSetup(runtimes: PartRuntimePackage[]): RuntimeSetup {
     managerColliderCaches,
     warnings,
   };
+}
+
+function resolveComposedBodyHeadAssembly(prefabGraphs: unknown[]) {
+  const parentAttachPath = resolveComposedBodyAttachPath(prefabGraphs);
+  if (
+    !parentAttachPath ||
+    !hasRuntimeSetupTransformPath(prefabGraphs, "face") ||
+    !hasRuntimeSetupTransformPath(prefabGraphs, "face/Position")
+  ) {
+    return null;
+  }
+  return {
+    version: "0414",
+    sourceKind: "viewer_composed_part_runtime_package",
+    parentRootPath: "body",
+    parentAttachPath,
+    childRootPath: "face",
+    childOriginPath: "face/Position",
+    runtimeMountPath: "PJSK_RuntimeMount_face",
+    parentingMode: "runtime_mount_preserve_child_origin",
+    coordinateSpace: "assetstudio-modelconverter-viewer-space",
+  };
+}
+
+function resolveComposedBodyAttachPath(prefabGraphs: unknown[]) {
+  return [
+    "body/Position/PositionOffset/Hip/Waist/Spine/Chest/Neck",
+    "body/Position/Hip/Waist/Spine/Chest/Neck",
+  ].find((path) => hasRuntimeSetupTransformPath(prefabGraphs, path)) ?? null;
+}
+
+function hasRuntimeSetupTransformPath(prefabGraphs: unknown[], path: string) {
+  return prefabGraphs.some((graph) =>
+    readRecordArray((graph as Record<string, unknown>)?.transforms)
+      .some((transform) => readOptionalString(transform.transformPath) === path)
+  );
 }
 
 function getPartRuntimeSetup(runtime: PartRuntimePackage): RuntimeSetup {
@@ -1084,9 +1123,44 @@ function attachPathPriority(path: string): number {
   return 10;
 }
 
-function mergeMaterialSlots<T>(base: T[] | undefined, runtimes: PartRuntimePackage[]): T[] {
-  const exported = runtimes.flatMap((runtime) => runtime.materialSlots ?? []) as T[];
-  return exported.length ? exported : [...(base ?? [])];
+type MaterialSlotWithTextures = {
+  mainTex?: string | null;
+  shadowTex?: string | null;
+  valueTex?: string | null;
+  faceShadowTex?: string | null;
+};
+
+function mergeMaterialSlots<T extends MaterialSlotWithTextures>(
+  base: T[] | undefined,
+  runtimes: PartRuntimePackage[],
+  resolveUrl: (path: string) => string
+): T[] {
+  const exported = runtimes.flatMap((runtime) => {
+    const resolvePartUrl = createPartUrlResolver(runtime, resolveUrl);
+    return ((runtime.materialSlots ?? []) as T[]).map((slot) =>
+      resolveMaterialSlotTextureUrls(slot, resolvePartUrl)
+    );
+  });
+  if (exported.length) {
+    return exported;
+  }
+  const resolveFallbackUrl = runtimes[0] ? createPartUrlResolver(runtimes[0], resolveUrl) : resolveUrl;
+  return [...(base ?? [])].map((slot) =>
+    resolveMaterialSlotTextureUrls(slot, resolveFallbackUrl)
+  );
+}
+
+function resolveMaterialSlotTextureUrls<T extends MaterialSlotWithTextures>(
+  slot: T,
+  resolveUrl: (path: string) => string
+): T {
+  return {
+    ...slot,
+    mainTex: resolveMaybeUrl(slot.mainTex ?? undefined, resolveUrl) ?? slot.mainTex,
+    shadowTex: resolveMaybeUrl(slot.shadowTex ?? undefined, resolveUrl) ?? slot.shadowTex,
+    valueTex: resolveMaybeUrl(slot.valueTex ?? undefined, resolveUrl) ?? slot.valueTex,
+    faceShadowTex: resolveMaybeUrl(slot.faceShadowTex ?? undefined, resolveUrl) ?? slot.faceShadowTex,
+  };
 }
 
 function resolveMaybeUrl(value: string | undefined, resolveUrl: (path: string) => string) {

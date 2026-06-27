@@ -3098,7 +3098,7 @@ function isFaceAssemblyBridgeMotionTarget(target: BodyMotionTarget) {
   if (target.poseRoot !== "face") {
     return false;
   }
-  return /^face\/Position(?:\/Hip(?:\/Waist(?:\/Spine(?:\/Chest(?:\/Neck)?)?)?)?)?$/.test(
+  return /^face\/Position(?:\/Hip(?:\/Waist(?:\/Spine(?:\/Chest(?:\/Neck(?:\/Head)?)?)?)?)?)?$/.test(
     target.transformPath
   );
 }

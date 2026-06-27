@@ -212,3 +212,46 @@ test("unity prefab source graph mounts every duplicate composed face root", () =
   assert.match(engineSource, /for \(const mountedHeadRoot of headRoots\)/);
   assert.match(engineSource, /findUnityPrefabChildByName\(mountedHeadRoot, "Position"\)/);
 });
+
+test("part runtime loader preserves registry package path on loaded packages", () => {
+  const loaderSource = fs.readFileSync(
+    path.join(repoRoot, "src/runtime/runtimePackageLoader.ts"),
+    "utf8"
+  );
+
+  assert.match(loaderSource, /withPartRuntimePackagePath/);
+  assert.match(loaderSource, /packagePath:\s*entry\.packagePath/);
+});
+
+test("part composer resolves material textures relative to each source package", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /resolveMaterialSlotTextureUrls/);
+  assert.match(composerSource, /mainTex:\s*resolveMaybeUrl\(slot\.mainTex/);
+  assert.match(composerSource, /shadowTex:\s*resolveMaybeUrl\(slot\.shadowTex/);
+  assert.match(composerSource, /valueTex:\s*resolveMaybeUrl\(slot\.valueTex/);
+  assert.match(composerSource, /faceShadowTex:\s*resolveMaybeUrl\(slot\.faceShadowTex/);
+  assert.match(composerSource, /runtime\.materialSlots \?\? \[\]/);
+  assert.match(composerSource, /resolveMaterialSlotTextureUrls\(slot, resolvePartUrl\)/);
+});
+
+test("composed part runtime declares body-head assembly for motion retarget suppression", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+  const engineSource = fs.readFileSync(
+    path.join(repoRoot, "src/engine/Haruki3DEngine.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /bodyHeadAssembly:.*resolveComposedBodyHeadAssembly/s);
+  assert.match(composerSource, /const parentAttachPath = resolveComposedBodyAttachPath/);
+  assert.match(composerSource, /childRootPath:\s*"face"/);
+  assert.match(composerSource, /childOriginPath:\s*"face\/Position"/);
+  assert.match(engineSource, /hasUnityBodyHeadAssembly\(extension\)/);
+  assert.match(engineSource, /isFaceAssemblyBridgeMotionTarget/);
+});
