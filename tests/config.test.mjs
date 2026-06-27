@@ -209,8 +209,10 @@ test("unity prefab source graph mounts every duplicate composed face root", () =
   );
 
   assert.match(engineSource, /const headRoots = collectUnityPrefabHeadRoots/);
-  assert.match(engineSource, /for \(const mountedHeadRoot of headRoots\)/);
-  assert.match(engineSource, /findUnityPrefabChildByName\(mountedHeadRoot, "Position"\)/);
+  assert.match(engineSource, /const headRootMounts = headRoots\.map/);
+  assert.match(engineSource, /resolveUnityPrefabMountedHeadOrigin/);
+  assert.match(engineSource, /originRestLocalToRoot/);
+  assert.doesNotMatch(engineSource, /findUnityPrefabChildByName\(mountedHeadRoot, "Position"\)/);
 });
 
 test("part runtime loader preserves registry package path on loaded packages", () => {
@@ -250,8 +252,13 @@ test("composed part runtime declares body-head assembly for motion retarget supp
 
   assert.match(composerSource, /bodyHeadAssembly:.*resolveComposedBodyHeadAssembly/s);
   assert.match(composerSource, /const parentAttachPath = resolveComposedBodyAttachPath/);
+  assert.match(composerSource, /const childOriginPath = resolveComposedHeadOriginPath/);
   assert.match(composerSource, /childRootPath:\s*"face"/);
-  assert.match(composerSource, /childOriginPath:\s*"face\/Position"/);
+  assert.match(composerSource, /childOriginPath,/);
+  assert.match(composerSource, /"face\/Position\/Hip\/Waist\/Spine\/Chest\/Neck"/);
+  assert.match(composerSource, /runtimeMountPath:\s*`\$\{parentAttachPath\}\/__PJSK_RuntimeMount_face`/);
+  assert.match(composerSource, /parentingMode:\s*"parent_child_runtime_mount"/);
+  assert.match(composerSource, /coordinateSpace:\s*"unity-left-handed"/);
   assert.match(engineSource, /hasUnityBodyHeadAssembly\(extension\)/);
   assert.match(engineSource, /isFaceAssemblyBridgeMotionTarget/);
 });

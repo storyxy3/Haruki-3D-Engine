@@ -584,6 +584,8 @@ type PrefabHeadFollowDebug = {
   };
   targetCount?: number;
   targetPaths?: string[];
+  mountedHeadRootCount?: number;
+  mountedHeadOriginPaths?: string[];
   positionRoots?: PrefabHeadFollowNodeDebug[];
   keyNodes?: Record<string, PrefabHeadFollowNodeDebug | null>;
   assemblyDistances?: {
@@ -718,6 +720,13 @@ type UnityPrefabSourceGraph = {
   assemblyMount: THREE.Object3D | null;
   assemblyMountPath: string | null;
   headOriginRestLocalToHeadRoot: THREE.Matrix4 | null;
+  headRootMounts: Array<{
+    root: THREE.Object3D;
+    rootPath: string | null;
+    origin: THREE.Object3D | null;
+    originPath: string | null;
+    originRestLocalToRoot: THREE.Matrix4 | null;
+  }>;
   debug: PrefabHeadFollowDebug;
 };
 
@@ -2053,21 +2062,43 @@ function collectUnityPrefabHeadRoots(
   return roots;
 }
 
-function findUnityPrefabChildByName(
-  root: THREE.Object3D,
-  name: string
-): THREE.Object3D | null {
-  const normalized = name.toLowerCase();
-  let best: THREE.Object3D | null = null;
-  root.traverse((node) => {
-    if (node === root || best) {
+function getUnityPrefabTransformPath(node: THREE.Object3D) {
+  const path = node.userData.pjskTransformPath;
+  return typeof path === "string" && path.length > 0 ? path : null;
+}
+
+function resolveUnityPrefabMountedHeadOrigin(
+  mountedHeadRoot: THREE.Object3D,
+  assembly: RuntimeUnityBodyHeadAssemblySource | undefined,
+  fallbackOriginPath: string | null | undefined
+): { path: string; node: THREE.Object3D } | null {
+  const rootPath = getUnityPrefabTransformPath(mountedHeadRoot);
+  const absoluteOriginPath = assembly?.childOriginPath ?? fallbackOriginPath ?? null;
+  const relativeOriginPath =
+    rootPath && absoluteOriginPath?.startsWith(`${rootPath}/`)
+      ? absoluteOriginPath.slice(rootPath.length + 1)
+      : null;
+  let absoluteMatch: { path: string; node: THREE.Object3D } | null = null;
+  let relativeMatch: { path: string; node: THREE.Object3D } | null = null;
+
+  mountedHeadRoot.traverse((node) => {
+    if (absoluteMatch) {
       return;
     }
-    if (stripThreeDuplicateSuffix(node.name).toLowerCase() === normalized) {
-      best = node;
+    const transformPath = getUnityPrefabTransformPath(node);
+    if (absoluteOriginPath && transformPath === absoluteOriginPath) {
+      absoluteMatch = { path: absoluteOriginPath, node };
+      return;
+    }
+    if (relativeOriginPath) {
+      const relativePath = buildObjectPath(node, mountedHeadRoot, true);
+      if (relativePath === relativeOriginPath) {
+        relativeMatch = { path: `${rootPath}/${relativePath}`, node };
+      }
     }
   });
-  return best;
+
+  return absoluteMatch ?? relativeMatch;
 }
 
 function computeUnityPrefabRestOffset(
@@ -2176,6 +2207,24 @@ function buildUnityPrefabSourceGraph(
       .invert()
       .multiply(headOrigin.node.matrixWorld);
   }
+  const headRootMounts = headRoots.map((mountedHeadRoot) => {
+    const rootPath = getUnityPrefabTransformPath(mountedHeadRoot);
+    const mountedHeadOrigin = resolveUnityPrefabMountedHeadOrigin(
+      mountedHeadRoot,
+      assembly,
+      headOrigin?.path ?? "face/Position"
+    );
+    const originRestLocalToRoot = mountedHeadOrigin
+      ? computeUnityPrefabRestOffset(mountedHeadRoot, mountedHeadOrigin.node)
+      : null;
+    return {
+      root: mountedHeadRoot,
+      rootPath,
+      origin: mountedHeadOrigin?.node ?? null,
+      originPath: mountedHeadOrigin?.path ?? null,
+      originRestLocalToRoot,
+    };
+  });
 
   let assemblyMount: THREE.Object3D | null = null;
   let assemblyMountPath: string | null = null;
@@ -2188,32 +2237,26 @@ function buildUnityPrefabSourceGraph(
     assemblyMountPath = runtimeMountPath;
     bodyAttach.node.add(assemblyMount);
 
-    for (const mountedHeadRoot of headRoots) {
-      const mountedHeadOrigin = mountedHeadRoot === headRoot.node
-        ? headOrigin?.node ?? findUnityPrefabChildByName(mountedHeadRoot, "Position")
-        : findUnityPrefabChildByName(mountedHeadRoot, "Position");
-      const mountedHeadOriginRestLocalToHeadRoot = mountedHeadOrigin
-        ? computeUnityPrefabRestOffset(mountedHeadRoot, mountedHeadOrigin)
-        : null;
-      if (mountedHeadRoot.parent) {
-        mountedHeadRoot.parent.remove(mountedHeadRoot);
+    for (const mounted of headRootMounts) {
+      if (mounted.root.parent) {
+        mounted.root.parent.remove(mounted.root);
       }
-      assemblyMount.add(mountedHeadRoot);
-      if (mountedHeadOriginRestLocalToHeadRoot) {
+      assemblyMount.add(mounted.root);
+      if (mounted.originRestLocalToRoot) {
         const headRootLocal = new THREE.Matrix4()
-          .copy(mountedHeadOriginRestLocalToHeadRoot)
+          .copy(mounted.originRestLocalToRoot)
           .invert();
         headRootLocal.decompose(
-          mountedHeadRoot.position,
-          mountedHeadRoot.quaternion,
-          mountedHeadRoot.scale
+          mounted.root.position,
+          mounted.root.quaternion,
+          mounted.root.scale
         );
       } else {
-        mountedHeadRoot.position.set(0, 0, 0);
-        mountedHeadRoot.quaternion.identity();
-        mountedHeadRoot.scale.set(1, 1, 1);
+        mounted.root.position.set(0, 0, 0);
+        mounted.root.quaternion.identity();
+        mounted.root.scale.set(1, 1, 1);
       }
-      mountedHeadRoot.updateMatrix();
+      mounted.root.updateMatrix();
     }
     nodeByPath.set(runtimeMountPath, assemblyMount);
     root.updateMatrixWorld(true);
@@ -2245,6 +2288,10 @@ function buildUnityPrefabSourceGraph(
       : "body attach prefab node was not found",
     setupVersion: String(setup.version ?? ""),
     sourceScaleCorrection,
+    mountedHeadRootCount: headRootMounts.length,
+    mountedHeadOriginPaths: headRootMounts.map((mount) =>
+      mount.originPath ?? mount.rootPath ?? mount.root.name
+    ),
     targetCount: meshCarrierBindings.length,
     targetPaths: meshCarrierBindings.slice(0, 24).map((binding) =>
       String(binding.source.userData.pjskTransformPath ?? binding.source.name)
@@ -2269,6 +2316,7 @@ function buildUnityPrefabSourceGraph(
     assemblyMount,
     assemblyMountPath,
     headOriginRestLocalToHeadRoot,
+    headRootMounts,
     debug,
   };
 }
@@ -8207,17 +8255,29 @@ export class Haruki3DEngine {
         graph.assemblyMount.updateMatrix();
         graph.assemblyMount.updateMatrixWorld(true);
       }
-      if (graph.headOriginRestLocalToHeadRoot) {
-        this.tempMatrixB.copy(graph.headOriginRestLocalToHeadRoot).invert();
+      const mounts = graph.headRootMounts.length
+        ? graph.headRootMounts
+        : [{
+          root: graph.headRoot,
+          rootPath: graph.headRootPath,
+          origin: graph.headOrigin,
+          originPath: graph.headOriginPath,
+          originRestLocalToRoot: graph.headOriginRestLocalToHeadRoot,
+        }];
+      for (const mounted of mounts) {
+        if (!mounted.originRestLocalToRoot) {
+          continue;
+        }
+        this.tempMatrixB.copy(mounted.originRestLocalToRoot).invert();
         this.tempMatrixB.decompose(
           this.tempVector,
           this.tempQuaternion,
           this.tempScale
         );
-        graph.headRoot.position.copy(this.tempVector);
-        graph.headRoot.quaternion.copy(this.tempQuaternion);
-        graph.headRoot.scale.copy(this.tempScale);
-        graph.headRoot.updateMatrix();
+        mounted.root.position.copy(this.tempVector);
+        mounted.root.quaternion.copy(this.tempQuaternion);
+        mounted.root.scale.copy(this.tempScale);
+        mounted.root.updateMatrix();
       }
       graph.root.updateMatrixWorld(true);
     }

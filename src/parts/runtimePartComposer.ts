@@ -741,10 +741,11 @@ function mergeRuntimeSetup(runtimes: PartRuntimePackage[]): RuntimeSetup {
 
 function resolveComposedBodyHeadAssembly(prefabGraphs: unknown[]) {
   const parentAttachPath = resolveComposedBodyAttachPath(prefabGraphs);
+  const childOriginPath = resolveComposedHeadOriginPath(prefabGraphs);
   if (
     !parentAttachPath ||
     !hasRuntimeSetupTransformPath(prefabGraphs, "face") ||
-    !hasRuntimeSetupTransformPath(prefabGraphs, "face/Position")
+    !childOriginPath
   ) {
     return null;
   }
@@ -754,10 +755,10 @@ function resolveComposedBodyHeadAssembly(prefabGraphs: unknown[]) {
     parentRootPath: "body",
     parentAttachPath,
     childRootPath: "face",
-    childOriginPath: "face/Position",
-    runtimeMountPath: "PJSK_RuntimeMount_face",
-    parentingMode: "runtime_mount_preserve_child_origin",
-    coordinateSpace: "assetstudio-modelconverter-viewer-space",
+    childOriginPath,
+    runtimeMountPath: `${parentAttachPath}/__PJSK_RuntimeMount_face`,
+    parentingMode: "parent_child_runtime_mount",
+    coordinateSpace: "unity-left-handed",
   };
 }
 
@@ -765,6 +766,13 @@ function resolveComposedBodyAttachPath(prefabGraphs: unknown[]) {
   return [
     "body/Position/PositionOffset/Hip/Waist/Spine/Chest/Neck",
     "body/Position/Hip/Waist/Spine/Chest/Neck",
+  ].find((path) => hasRuntimeSetupTransformPath(prefabGraphs, path)) ?? null;
+}
+
+function resolveComposedHeadOriginPath(prefabGraphs: unknown[]) {
+  return [
+    "face/Position/Hip/Waist/Spine/Chest/Neck",
+    "face/Position",
   ].find((path) => hasRuntimeSetupTransformPath(prefabGraphs, path)) ?? null;
 }
 
