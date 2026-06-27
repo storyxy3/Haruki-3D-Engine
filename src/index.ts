@@ -47,6 +47,7 @@ export {
   type PartPackageSet,
   type PartRegistryEntry,
   type PartRuntimePackage,
+  type RoleRuntimePackage,
   type RuntimePartType,
 } from "./parts/runtimePartComposer";
 export {

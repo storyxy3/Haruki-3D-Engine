@@ -16,12 +16,14 @@ import { CustomWardrobeController } from "../parts/customWardrobeController";
 import {
   getCharacterIndexEntries,
   getDefaultCustomSelection,
+  runtimeRoleId,
   tryNormalizeRuntimePartType,
   type Character3dIndex,
   type HeadHairCompatibility,
   type PartPackageSet,
   type PartRegistryEntry,
   type PartRuntimePackage,
+  type RoleRuntimePackage,
   type RuntimePartType,
 } from "../parts/runtimePartComposer";
 
@@ -180,6 +182,7 @@ async function loadPartPackageSetFromBaseUrl(baseUrl: string): Promise<PartPacka
   const compatibility = await fetchOptionalJson<HeadHairCompatibility>(
     resolveRuntimePackageUrl(baseUrl, "parts/head-hair-compatibility.json")
   );
+  const characterIndexEntries = characterIndex ? getCharacterIndexEntries(characterIndex) : [];
   const packages = new Map<string, PartRuntimePackage>();
   const candidates = selectPartRuntimeCandidates(registry, characterIndex, compatibility);
   const batchSize = 24;
@@ -206,13 +209,89 @@ async function loadPartPackageSetFromBaseUrl(baseUrl: string): Promise<PartPacka
       `Part registry package did not expose a compatible loaded body/head/hair selection from ${baseUrl}.`
     );
   }
-  return {
+  const defaultSelection = getDefaultCustomSelection({
     registry,
-    characterIndex: characterIndex ? getCharacterIndexEntries(characterIndex) : [],
+    characterIndex: characterIndexEntries,
     compatibility,
     packages,
+    roleRuntimes: new Map<string, RoleRuntimePackage>(),
+    baseUrl,
+  });
+  const targetRoleIds = defaultSelection
+    ? new Set([runtimeRoleId(defaultSelection.characterId, defaultSelection.unit)])
+    : null;
+  const roleRuntimes = await loadRoleRuntimePackages(
+    baseUrl,
+    characterIndexEntries,
+    targetRoleIds
+  );
+  return {
+    registry,
+    characterIndex: characterIndexEntries,
+    compatibility,
+    packages,
+    roleRuntimes,
     baseUrl,
   };
+}
+
+async function loadRoleRuntimePackages(
+  baseUrl: string,
+  characterIndex: ReturnType<typeof getCharacterIndexEntries>,
+  targetRoleIds: ReadonlySet<string> | null = null
+): Promise<Map<string, RoleRuntimePackage>> {
+  const result = new Map<string, RoleRuntimePackage>();
+  const entries = characterIndex.filter((entry) =>
+    entry.roleRuntimePath &&
+    (!targetRoleIds || targetRoleIds.has(runtimeRoleId(entry.characterId, entry.unit ?? null)))
+  );
+  const loaded = await Promise.all(entries.map(async (entry) => ({
+    entry,
+    runtime: await fetchOptionalJson<RoleRuntimePackage>(
+      resolveRuntimePackageUrl(baseUrl, entry.roleRuntimePath!)
+    ),
+  })));
+  for (const item of loaded) {
+    if (!item.runtime) {
+      continue;
+    }
+    const characterId = item.runtime.role?.characterId ?? item.entry.characterId;
+    const unit = item.runtime.role?.unit ?? item.entry.unit ?? null;
+    const runtime = normalizeRoleRuntimePackage(baseUrl, item.entry.roleRuntimePath!, item.runtime);
+    result.set(runtimeRoleId(characterId, unit), runtime);
+  }
+  return result;
+}
+
+function normalizeRoleRuntimePackage(
+  baseUrl: string,
+  roleRuntimePath: string,
+  runtime: RoleRuntimePackage
+): RoleRuntimePackage {
+  const motionPackage = runtime.motionPackage;
+  const unityMotionJson = motionPackage?.unityMotionJson;
+  if (!unityMotionJson || /^[a-z][a-z0-9+.-]*:/i.test(unityMotionJson) || unityMotionJson.startsWith("/")) {
+    return runtime;
+  }
+  return {
+    ...runtime,
+    motionPackage: {
+      ...motionPackage,
+      unityMotionJson: resolveRuntimePackageUrl(
+        baseUrl,
+        resolveSiblingRuntimePath(roleRuntimePath, unityMotionJson)
+      ),
+    },
+  };
+}
+
+function resolveSiblingRuntimePath(packageFilePath: string, relativePath: string) {
+  const normalizedPackagePath = packageFilePath.replace(/\\/g, "/");
+  const directory = normalizedPackagePath.split("/").slice(0, -1).join("/");
+  if (!directory) {
+    return relativePath;
+  }
+  return `${directory}/${relativePath.replace(/^\/+/, "")}`;
 }
 
 async function loadPartRuntimePackage(
@@ -394,6 +473,7 @@ function hasUsableCustomPartSelection(
     characterIndex: characterIndex ? getCharacterIndexEntries(characterIndex) : [],
     compatibility,
     packages,
+    roleRuntimes: new Map<string, RoleRuntimePackage>(),
     baseUrl,
   };
   return Boolean(getDefaultCustomSelection(partSet));

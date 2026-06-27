@@ -754,6 +754,14 @@ function countArray(value: unknown) {
   return Array.isArray(value) ? value.length : 0;
 }
 
+function readEmbeddedRuntimeFaceMotion(extension: unknown): FaceMotionSet | null {
+  const motionPackage = asRecord(
+    asRecord(extension).motionPackage ?? asRecord(extension).MotionPackage
+  );
+  const faceMotion = motionPackage.faceMotion ?? motionPackage.FaceMotion;
+  return faceMotion ? faceMotion as FaceMotionSet : null;
+}
+
 function summarizeSpringBonePart(value: unknown) {
   const part = asRecord(value);
   return {
@@ -3444,6 +3452,7 @@ export class Haruki3DEngine {
   private renderIsolationMode: RenderIsolationMode = "normal";
   private cameraDebugChangeCallback: (() => void) | null = null;
   private currentLoadedRuntimePackage: RuntimePackageLoadResult | null = null;
+  private lastNativeMeshInstallDiagnostics: ReturnType<typeof installUnityRuntimeNativeMeshes> | null = null;
   private readonly runtimeDebug: RuntimeDebugSnapshot = {
     materialBindingMode: "manifest",
     body: [],
@@ -3644,6 +3653,7 @@ export class Haruki3DEngine {
   ): Promise<PartImportSnapshot> {
     const revision = ++this.importRevision;
     this.runtimeDebug.outlineShells = [];
+    this.lastNativeMeshInstallDiagnostics = null;
     this.currentBodyAsset = characterAsset.bodyAsset;
     this.currentHeadAsset = characterAsset.headAsset;
     this.currentImportIsCombined = true;
@@ -4178,6 +4188,7 @@ export class Haruki3DEngine {
         materialKind: slot.materialKind,
         valueTex: slot.valueTex,
       })) ?? [],
+      nativeMeshes: this.lastNativeMeshInstallDiagnostics,
       camera: this.getCameraDebugSnapshot(),
       faceLight: this.getFaceLightDebugSnapshot(),
     };
@@ -4611,9 +4622,10 @@ export class Haruki3DEngine {
     )
       ? animationUrl
       : null;
-    if (request.applyFaceMotion !== false && loaded.faceMotion) {
+    const embeddedFaceMotion = readEmbeddedRuntimeFaceMotion(loaded.combinedCharacter.runtimeExtension);
+    if (request.applyFaceMotion !== false && (loaded.faceMotion ?? embeddedFaceMotion)) {
       this.setFaceMotionSet(
-        loaded.faceMotion,
+        loaded.faceMotion ?? embeddedFaceMotion,
         "face",
         defaultLoopUrl ? "face_loop" : null
       );
@@ -4640,8 +4652,11 @@ export class Haruki3DEngine {
     const previousAnimation = this.captureAnimationPlaybackState();
     const combined = await wardrobe.setCustomSelection(selection);
     await this.importCombinedCharacter(combined);
-    if (previousRoleId === wardrobe.getActiveRoleId()) {
+    const roleChanged = previousRoleId !== wardrobe.getActiveRoleId();
+    if (!roleChanged && previousAnimation.selection.motionUrl) {
       await this.continueAnimationPlaybackState(previousAnimation);
+    } else {
+      await this.applyCustomRoleDefaultMotion(combined, roleChanged);
     }
     return combined;
   }
@@ -4657,7 +4672,11 @@ export class Haruki3DEngine {
     const previousAnimation = this.captureAnimationPlaybackState();
     const combined = await wardrobe.updateCustomSelection(partType, costume3dId);
     await this.importCombinedCharacter(combined);
-    await this.continueAnimationPlaybackState(previousAnimation);
+    if (previousAnimation.selection.motionUrl) {
+      await this.continueAnimationPlaybackState(previousAnimation);
+    } else {
+      await this.applyCustomRoleDefaultMotion(combined, false);
+    }
     return combined;
   }
 
@@ -4699,6 +4718,38 @@ export class Haruki3DEngine {
       combinedCharacter,
       snapshots: this.getSnapshots(),
     };
+  }
+
+  private async applyCustomRoleDefaultMotion(
+    combined: RuntimeCombinedCharacterAsset,
+    force: boolean
+  ): Promise<void> {
+    const animationUrl = combined.bodyAsset.source.animationUrls?.[0];
+    const defaultAnimationKind: BodyAnimationKind | null = animationUrl
+      ? animationUrl.endsWith(".json") ? "unity-json" : "gltf"
+      : null;
+    const defaultLoopUrl = animationUrl && (
+      defaultAnimationKind === "unity-json" ||
+      /body[_-]?motion/i.test(animationUrl.split(/[/?#]/)[0] ?? "")
+    )
+      ? animationUrl
+      : null;
+    const faceMotion = readEmbeddedRuntimeFaceMotion(combined.runtimeExtension);
+    if (faceMotion) {
+      this.setFaceMotionSet(
+        faceMotion,
+        "face",
+        defaultLoopUrl ? "face_loop" : null
+      );
+    }
+    if (animationUrl && (force || !this.currentAnimationUrl)) {
+      await this.setAnimationSelection({
+        motionUrl: animationUrl,
+        motionKind: defaultAnimationKind,
+        loopUrl: defaultLoopUrl,
+        loopKind: defaultLoopUrl ? defaultAnimationKind : null,
+      });
+    }
   }
 
   private captureAnimationPlaybackState(): AnimationPlaybackRestoreState {
@@ -5756,6 +5807,7 @@ export class Haruki3DEngine {
         prefabSourceGraph,
         characterAsset.runtimeExtension
       );
+      this.lastNativeMeshInstallDiagnostics = nativeResult;
       if (nativeResult.error) {
         const message = nativeResult.error;
         this.runtimeDebug.body = [

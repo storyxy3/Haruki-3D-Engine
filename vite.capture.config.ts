@@ -20,12 +20,14 @@ export default defineConfig({
         capture: `${projectRoot}capture.html`,
       },
       output: {
-        manualChunks: {
-          "three-core": ["three"],
-          "three-extras": [
-            "three/examples/jsm/controls/OrbitControls.js",
-            "three/examples/jsm/loaders/GLTFLoader.js",
-          ],
+        manualChunks(id) {
+          if (id.includes("three/examples/jsm/")) {
+            return "three-extras";
+          }
+          if (id.includes("node_modules/three/")) {
+            return "three-core";
+          }
+          return undefined;
         },
       },
     },

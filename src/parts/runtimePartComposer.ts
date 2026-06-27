@@ -19,6 +19,7 @@ export type PartRegistryEntry = {
 
 export type Character3dIndexEntry = {
   id: number;
+  character3dId?: number;
   characterId: number;
   bodyCostume3dId?: number;
   headCostume3dId?: number;
@@ -26,6 +27,7 @@ export type Character3dIndexEntry = {
   headOptionalCostume3dId?: number | null;
   unit?: string | null;
   name?: string | null;
+  roleRuntimePath?: string | null;
 };
 
 export type Character3dIndex = {
@@ -74,11 +76,29 @@ export type PartRuntimePackage = {
   warnings?: string[];
 };
 
+export type RoleRuntimePackage = {
+  version: string;
+  role: {
+    characterId: number;
+    unit?: string | null;
+  };
+  sourceCharacter3dId?: number;
+  motionPackage?: {
+    sourcePath?: string;
+    unityMotionJson?: string | null;
+    bodyMotionBindings?: unknown;
+    faceMotion?: unknown;
+    lightMotion?: unknown;
+  } | null;
+  warnings?: string[];
+};
+
 export type PartPackageSet = {
   registry: PartRegistryEntry[];
   characterIndex: Character3dIndexEntry[];
   compatibility: HeadHairCompatibility | null;
   packages: Map<string, PartRuntimePackage>;
+  roleRuntimes: Map<string, RoleRuntimePackage>;
   baseUrl: string;
 };
 
@@ -307,7 +327,9 @@ export function composeRuntimeCombinedCharacterAsset(
   assertSameRole(selection.characterId, selection.unit, [body, head, hair, optional].filter(Boolean) as PartRuntimePackage[]);
   assertHeadHairCompatible(partSet.compatibility, selection);
 
+  const roleRuntime = partSet.roleRuntimes.get(selectionRoleId) ?? null;
   const bodyManifest = normalizeBodyManifestFromPart(body, resolveUrl);
+  applyRoleRuntimeMotion(bodyManifest, roleRuntime);
   const headManifest = normalizeHeadManifestFromParts(
     [head, hair, optional].filter(Boolean) as PartRuntimePackage[],
     selection,
@@ -316,7 +338,8 @@ export function composeRuntimeCombinedCharacterAsset(
   const runtimeExtension = composeRuntimeExtension(
     [body, head, hair, optional].filter(Boolean) as PartRuntimePackage[],
     bodyManifest,
-    headManifest
+    headManifest,
+    roleRuntime
   );
 
   return {
@@ -529,6 +552,20 @@ function normalizeBodyManifestFromPart(
   return manifest;
 }
 
+function applyRoleRuntimeMotion(
+  manifest: BodyAssetManifest,
+  roleRuntime: RoleRuntimePackage | null
+) {
+  const unityMotionJson = roleRuntime?.motionPackage?.unityMotionJson;
+  if (!unityMotionJson) {
+    return;
+  }
+  manifest.source = {
+    ...manifest.source,
+    animationUrls: [unityMotionJson],
+  };
+}
+
 function normalizeHeadManifestFromParts(
   runtimes: PartRuntimePackage[],
   selection: CustomPartSelection,
@@ -599,7 +636,8 @@ function readOptionalString(value: unknown) {
 function composeRuntimeExtension(
   runtimes: PartRuntimePackage[],
   bodyAsset: BodyAssetManifest,
-  headAsset: HeadAssetManifest
+  headAsset: HeadAssetManifest,
+  roleRuntime: RoleRuntimePackage | null
 ) {
   const runtimeSetup = mergeRuntimeSetup(runtimes);
   return {
@@ -612,12 +650,16 @@ function composeRuntimeExtension(
     materialSlots: runtimes.flatMap((runtime) => runtime.materialSlots ?? []),
     textureRoles: runtimes.flatMap((runtime) => runtime.textureRoles ?? []),
     characterTextures: Object.assign({}, ...runtimes.map((runtime) => runtime.characterTextures ?? {})),
-    nativeMeshes: mergeNativeMeshes(runtimes),
+    nativeMeshes: mergeNativeMeshes(runtimes, runtimeSetup),
+    motionPackage: roleRuntime?.motionPackage ?? null,
     morphChannelBindings: headAsset.morphChannelBindings ?? [],
     pjskSpringBone: {
       runtimeUnitySetup: runtimeSetup,
     },
-    warnings: runtimes.flatMap((runtime) => runtime.warnings ?? []),
+    warnings: [
+      ...runtimes.flatMap((runtime) => runtime.warnings ?? []),
+      ...(roleRuntime?.warnings ?? []),
+    ],
   };
 }
 
@@ -926,14 +968,99 @@ function firstPathSegment(value: string | null | undefined): string | null {
   return segment ?? null;
 }
 
-function mergeNativeMeshes(runtimes: PartRuntimePackage[]) {
+function mergeNativeMeshes(runtimes: PartRuntimePackage[], runtimeSetup: RuntimeSetup) {
+  const warnings = runtimes.flatMap((runtime) => runtime.warnings ?? []);
+  const meshes: Record<string, unknown>[] = [];
+  const optionalMeshKeys = new Set<string>();
+  for (const runtime of runtimes) {
+    const partType = normalizeRuntimePartType(runtime.part.partType);
+    for (const mesh of readRecordArray(runtime.nativeMeshes?.meshes)) {
+      if (partType !== "head_optional") {
+        meshes.push(mesh);
+        continue;
+      }
+
+      const sourceRendererTransformPath = readOptionalString(mesh.rendererTransformPath);
+      const attachPath = resolveHeadOptionalAttachPath(
+        readOptionalString(runtime.mount?.attachNode),
+        runtimeSetup,
+        sourceRendererTransformPath
+      );
+      if (!attachPath) {
+        warnings.push(
+          `Head optional mesh '${readOptionalString(mesh.meshPath) || readOptionalString(mesh.meshName) || "<unnamed>"}' kept at '${sourceRendererTransformPath || "<missing>"}': attach node '${readOptionalString(runtime.mount?.attachNode) || "<missing>"}' was not found in composed head graph.`
+        );
+        meshes.push(mesh);
+        continue;
+      }
+
+      const dedupeKey = [
+        readOptionalString(mesh.meshName),
+        readOptionalString(mesh.meshPath),
+        readRecordArray(mesh.submeshes).map((submesh) => readOptionalString(submesh.materialName)).join(","),
+      ].join("|");
+      if (optionalMeshKeys.has(dedupeKey)) {
+        warnings.push(
+          `Head optional duplicate native mesh '${readOptionalString(mesh.meshPath) || readOptionalString(mesh.meshName) || "<unnamed>"}' skipped after mount remap.`
+        );
+        continue;
+      }
+      optionalMeshKeys.add(dedupeKey);
+      meshes.push({
+        ...mesh,
+        sourceRendererTransformPath,
+        rendererTransformPath: attachPath,
+      });
+    }
+  }
   return {
     version: "0414",
-    meshes: runtimes.flatMap((runtime) =>
-      readRecordArray(runtime.nativeMeshes?.meshes)
-    ),
-    warnings: runtimes.flatMap((runtime) => runtime.warnings ?? []),
+    meshes,
+    warnings,
   };
+}
+
+function resolveHeadOptionalAttachPath(
+  attachNode: string | null | undefined,
+  runtimeSetup: RuntimeSetup,
+  sourceRendererTransformPath?: string | null
+): string | null {
+  const candidates = collectRuntimeSetupTransformPaths(runtimeSetup);
+  const requested = normalizePathSegment(attachNode) || normalizePathSegment(sourceRendererTransformPath);
+  if (!requested) {
+    return null;
+  }
+  const exact = candidates.find((path) => path === requested);
+  if (exact) {
+    return exact;
+  }
+  const byLeaf = candidates
+    .filter((path) => path.split("/").filter(Boolean).pop() === requested)
+    .sort((left, right) => attachPathPriority(left) - attachPathPriority(right) || left.localeCompare(right));
+  return byLeaf[0] ?? null;
+}
+
+function collectRuntimeSetupTransformPaths(runtimeSetup: RuntimeSetup): string[] {
+  return uniqueStrings(readRecordArray(runtimeSetup.prefabGraphs).flatMap((graph) =>
+    readRecordArray(graph.transforms).map((transform) =>
+      readOptionalString(transform.transformPath)
+    )
+  ).filter(Boolean));
+}
+
+function normalizePathSegment(value: string | null | undefined): string | null {
+  const normalized = value?.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? "";
+  return normalized || null;
+}
+
+function attachPathPriority(path: string): number {
+  if (path.startsWith("face/Position/")) {
+    return 0;
+  }
+  if (path.startsWith("face/")) {
+    return 1;
+  }
+  return 10;
 }
 
 function mergeMaterialSlots<T>(base: T[] | undefined, runtimes: PartRuntimePackage[]): T[] {

@@ -111,3 +111,26 @@ test("capture runtime parser allows config to replace built-in defaults", () => 
   assert.equal(options.timeoutMs, 12000);
   assert.equal(options.chromium, "/usr/bin/chromium-from-config");
 });
+
+test("part registry runtime path keeps role motion separate from part packages", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+  const loaderSource = fs.readFileSync(
+    path.join(repoRoot, "src/runtime/runtimePackageLoader.ts"),
+    "utf8"
+  );
+  const engineSource = fs.readFileSync(
+    path.join(repoRoot, "src/engine/Haruki3DEngine.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /type RoleRuntimePackage =/);
+  assert.match(composerSource, /resolveHeadOptionalAttachPath/);
+  assert.match(composerSource, /sourceRendererTransformPath/);
+  assert.match(loaderSource, /roleRuntimePath/);
+  assert.match(loaderSource, /loadRoleRuntimePackages/);
+  assert.match(engineSource, /applyCustomRoleDefaultMotion/);
+  assert.match(engineSource, /nativeMeshes: this\.lastNativeMeshInstallDiagnostics/);
+});
