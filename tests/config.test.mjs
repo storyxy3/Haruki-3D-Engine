@@ -27,7 +27,7 @@ test("loads engine config JSON and applies capture runtime CLI overrides", () =>
       phase: 0.25,
       clip: "motion_loop",
       springRuntimeMode: "unity-prefab",
-      cameraPreset: "id5-debug"
+      cameraPreset: "capture"
     },
     chromium: {
       executable: "/usr/bin/chromium"
@@ -60,7 +60,7 @@ test("loads engine config JSON and applies capture runtime CLI overrides", () =>
   assert.equal(server.defaultPhase, 0.25);
   assert.equal(server.defaultClip, "motion_loop");
   assert.equal(server.defaultSpringRuntimeMode, "unity-prefab");
-  assert.equal(server.defaultCameraPreset, "id5-debug");
+  assert.equal(server.defaultCameraPreset, "capture");
 });
 
 test("persistent capture server propagates config defaults into role parts capture", () => {
@@ -84,7 +84,56 @@ test("persistent capture server propagates config defaults into role parts captu
   assert.match(harnessSource, /phase: request\.phase \?\? config\.phase/);
   assert.match(harnessSource, /cameraPreset: request\.cameraPreset \?\? config\.cameraPreset/);
   assert.match(engineSource, /cameraPreset\?: PjskCameraPreset/);
-  assert.match(engineSource, /this\.applyCameraPreset\(request\.cameraPreset \?\? "id5-debug"\)/);
+  assert.match(engineSource, /this\.applyCameraPreset\(request\.cameraPreset \?\? "capture"\)/);
+});
+
+test("role parts capture supports warmup frames for spring runtime settling", () => {
+  const serverSource = fs.readFileSync(
+    path.join(repoRoot, "capture-server.mjs"),
+    "utf8"
+  );
+  const harnessSource = fs.readFileSync(
+    path.join(repoRoot, "src/captureHarness.ts"),
+    "utf8"
+  );
+  const engineSource = fs.readFileSync(
+    path.join(repoRoot, "src/engine/Haruki3DEngine.ts"),
+    "utf8"
+  );
+
+  assert.match(serverSource, /warmupFrames:\s*Math\.max\(Math\.trunc\(Number\(input\.warmupFrames\)/);
+  assert.match(serverSource, /warmupMode:\s*input\.warmupMode === "runtime" \? "runtime" : defaultWarmupMode === "runtime" \? "runtime" : "animation"/);
+  assert.match(harnessSource, /warmupFrames:\s*request\.warmupFrames \?\? config\.warmupFrames/);
+  assert.match(harnessSource, /warmupMode:\s*request\.warmupMode \?\? config\.warmupMode/);
+  assert.match(engineSource, /warmupFrames\?: number/);
+  assert.match(engineSource, /warmupMode\?: "animation" \| "runtime"/);
+  assert.match(engineSource, /for \(let index = 0; index < warmupFrames; index \+= 1\)/);
+  assert.match(engineSource, /this\.stepCaptureFrame\(1 \/ 60, advanceWarmupAnimation\)/);
+});
+
+test("role parts capture reuses full runtime capture frame preparation", () => {
+  const harnessSource = fs.readFileSync(
+    path.join(repoRoot, "src/captureHarness.ts"),
+    "utf8"
+  );
+  const engineSource = fs.readFileSync(
+    path.join(repoRoot, "src/engine/Haruki3DEngine.ts"),
+    "utf8"
+  );
+  const captureRolePartsBody = engineSource.match(
+    /async captureRoleParts\([^]*?return \{\s+selection,\s+combinedCharacter,\s+snapshots: this\.getSnapshots\([^]*?\),\s+\};\s+\}/
+  )?.[0] ?? "";
+  const prepareCaptureFrameBody = engineSource.match(
+    /prepareCaptureFrame\([^]*?this\.renderFrame\(\);\s+\}/
+  )?.[0] ?? "";
+
+  assert.match(harnessSource, /await engine\.prepareCaptureFrame\(/);
+  assert.match(captureRolePartsBody, /await this\.prepareCaptureFrame\(/);
+  assert.doesNotMatch(captureRolePartsBody, /this\.seekAnimationLoopPhase/);
+  assert.match(prepareCaptureFrameBody, /const startPhase = advanceWarmupAnimation && warmupFrames > 0 && duration > 0/);
+  assert.match(prepareCaptureFrameBody, /seekTargetPhase\(startPhase\);/);
+  assert.match(prepareCaptureFrameBody, /for \(let index = 0; index < warmupFrames; index \+= 1\)/);
+  assert.equal(prepareCaptureFrameBody.match(/seekTargetPhase\(/g)?.length, 1);
 });
 
 test("combined runtime imports apply character height before capture camera framing", () => {
@@ -179,6 +228,75 @@ test("part registry runtime path keeps role motion separate from part packages",
   assert.match(engineSource, /nativeMeshes: this\.lastNativeMeshInstallDiagnostics/);
 });
 
+test("custom composer filters complete-head hair packages instead of stacking duplicate face roots", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /resolveHeadHairComposition/);
+  assert.match(composerSource, /filterRuntimeContributors/);
+  assert.match(composerSource, /isRuntimeContributor/);
+  assert.match(composerSource, /const contributingRuntimes = filterRuntimeContributors/);
+  assert.match(composerSource, /normalizeHeadManifestFromParts\(\s+filterRuntimeContributors/);
+  assert.match(composerSource, /composeRuntimeExtension\(\s+contributingRuntimes/);
+  assert.match(composerSource, /mergeRuntimeSetup\(contributorRuntimes\)/);
+  assert.match(composerSource, /mergeNativeMeshes\(contributorRuntimes/);
+  assert.doesNotMatch(composerSource, /runtimes\.flatMap\(\(runtime\) => runtime\.materialSlots \?\? \[\]\)/);
+});
+
+test("custom composer narrows SpringBone records to the active root for each part", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /selectRuntimePartActiveRoots/);
+  assert.match(composerSource, /filterRuntimeRecordsByActiveRoots/);
+  assert.match(composerSource, /filterColliderBindingsByActiveBones/);
+  assert.match(composerSource, /filterManagerColliderCachesByActiveManagers/);
+  assert.match(composerSource, /partType === "body" && activeRoots\.includes\("body"\)/);
+  assert.match(composerSource, /partType === "head" \|\| partType === "hair"/);
+  assert.match(composerSource, /activeRoots\.includes\("face"\)/);
+  assert.match(composerSource, /selectedActiveRoots/);
+  assert.match(composerSource, /activeRoots: selectedActiveRoots/);
+});
+
+test("custom composer rebinds head colliderFlag springs to active body colliders", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /rebuildDeferredColliderFlagBinding/);
+  assert.match(composerSource, /selectBodyCollidersForColliderFlag/);
+  assert.match(composerSource, /matchesColliderFlagPrefix/);
+  assert.match(composerSource, /rebuildHeadManagerColliderCache/);
+  assert.match(composerSource, /matchedPrefixes/);
+  assert.match(composerSource, /deferred_body_colliderFlag/);
+  assert.match(composerSource, /viewer_composed_head_body_collider_cache/);
+});
+
+test("custom capture exposes SpringBone trace and named offset diagnostics", () => {
+  const serverSource = fs.readFileSync(path.join(repoRoot, "capture-server.mjs"), "utf8");
+  const harnessSource = fs.readFileSync(path.join(repoRoot, "src/captureHarness.ts"), "utf8");
+  const engineSource = fs.readFileSync(path.join(repoRoot, "src/engine/Haruki3DEngine.ts"), "utf8");
+  const springSource = fs.readFileSync(
+    path.join(repoRoot, "src/engine/unityPrefabSpringRuntimeAdapter.ts"),
+    "utf8"
+  );
+
+  assert.match(serverSource, /traceUtjBones/);
+  assert.match(serverSource, /springDebugBones/);
+  assert.match(harnessSource, /utjSpringBoneTrace: engine\.getUtjSpringBoneTraceSnapshot\(\)/);
+  assert.match(harnessSource, /await ensureCaptureRuntimePackage\(config\);\s+engine\.setUtjSpringBoneTraceFilters/s);
+  assert.match(engineSource, /traceUtjBones\?: string\[\]/);
+  assert.match(engineSource, /springDebugBones\?: string\[\]/);
+  assert.match(engineSource, /getSnapshots\(\{\s+springDebugBones: request\.springDebugBones/s);
+  assert.match(springSource, /debugOffsets/);
+  assert.match(springSource, /springDebugAllOffsets/);
+});
+
 test("docker runtime image includes capture server config module", () => {
   const dockerfile = fs.readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
 
@@ -221,9 +339,13 @@ test("capture server readiness waits for request API, not default wardrobe boots
   );
 });
 
-test("part runtime body manifests provide proxy color defaults", () => {
+test("part runtime manifests preserve exporter proxy colors before fallback defaults", () => {
   const composerSource = fs.readFileSync(
     path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+  const loaderSource = fs.readFileSync(
+    path.join(repoRoot, "src/runtime/runtimePackageLoader.ts"),
     "utf8"
   );
 
@@ -233,6 +355,29 @@ test("part runtime body manifests provide proxy color defaults", () => {
   assert.match(composerSource, /faceColor:\s*manifest\.proxy\.faceColor \?\? "#fde2d9"/);
   assert.match(composerSource, /skinColorDefault:\s*manifest\.proxy\.skinColorDefault \?\? manifest\.proxy\.faceColor \?\? "#fde2d9"/);
   assert.match(composerSource, /hairColor:\s*manifest\.proxy\.hairColor \?\? "#7b5b4a"/);
+  assert.match(loaderSource, /const proxy = asRecord\(record\.proxy \?\? record\.Proxy\)/);
+  assert.match(loaderSource, /bodyColor:\s*readString\(proxy\.bodyColor \?\? proxy\.BodyColor, "#f2d0c3"\)/);
+  assert.match(loaderSource, /shadowColor:\s*readString\(proxy\.shadowColor \?\? proxy\.ShadowColor, "#bf958a"\)/);
+  assert.match(loaderSource, /faceColor:\s*readString\(proxy\.faceColor \?\? proxy\.FaceColor, "#fde2d9"\)/);
+  assert.match(loaderSource, /skinColor2:\s*readString\(proxy\.skinColor2 \?\? proxy\.SkinColor2, readString\(proxy\.faceShadeColor \?\? proxy\.FaceShadeColor, "#f7cdbf"\)\)/);
+});
+
+test("legacy custom part manifests infer character height before capture framing", () => {
+  const composerSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/runtimePartComposer.ts"),
+    "utf8"
+  );
+
+  assert.match(composerSource, /characterHeightMetersById/);
+  assert.match(composerSource, /function resolveRuntimePartCharacterHeightMeters/);
+  assert.match(
+    composerSource,
+    /manifest\.characterHeightMeters\s*\?\?=\s*resolveRuntimePartCharacterHeightMeters\(runtime\.part\.characterId\)/
+  );
+  assert.match(
+    composerSource,
+    /manifest\.characterHeightMeters\s*\?\?=\s*resolveRuntimePartCharacterHeightMeters\(selection\.characterId\)/
+  );
 });
 
 test("unity prefab source graph mounts composed part head without exporter assembly metadata", () => {

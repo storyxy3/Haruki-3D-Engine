@@ -16,6 +16,7 @@ import {
   type UtjSpringBoneState,
 } from "./utjSpringBoneRuntime";
 import type {
+  UtjSpringBoneDebugOptions,
   UtjSpringBoneRuntimeSnapshot,
   UtjSpringBoneTraceSnapshot,
 } from "./utjSpringBoneRuntimeAdapter";
@@ -514,7 +515,10 @@ export class UnityPrefabSpringRuntime {
     }
   }
 
-  getSnapshot(enabled = true): UtjSpringBoneRuntimeSnapshot {
+  getSnapshot(
+    enabled = true,
+    debugOptions: UtjSpringBoneDebugOptions = {}
+  ): UtjSpringBoneRuntimeSnapshot {
     const colliderIndexes = new Set<RuntimeCollider>();
     const topOffsets: UtjSpringBoneRuntimeSnapshot["topOffsets"] = [];
     const skirtOffsets: UtjSpringBoneRuntimeSnapshot["skirtOffsets"] = [];
@@ -577,6 +581,13 @@ export class UnityPrefabSpringRuntime {
         managerDynamicRatio: bone.dynamicRatio,
         dynamicRatio: getEffectiveDynamicRatio(bone),
         isAnimated: bone.isAnimated,
+        automaticUpdates: bone.automaticUpdates,
+        boneEnabled: bone.enabled,
+        bonePaused: bone.isPaused,
+        isSumOfForcesOnBone: bone.isSumOfForcesOnBone,
+        simulationFrameRate: bone.simulationFrameRate,
+        slowMotionScale: bone.slowMotionScale,
+        updateSkipReason: getUpdateSkipReason(bone),
         animatedTipDelta: vectorSnapshot(animatedTipDelta),
         velocity: vectorSnapshot(velocity),
         springForce: vectorSnapshot(bone.springForce),
@@ -616,6 +627,13 @@ export class UnityPrefabSpringRuntime {
           managerDynamicRatio: bone.dynamicRatio,
           dynamicRatio: getEffectiveDynamicRatio(bone),
           isAnimated: bone.isAnimated,
+          automaticUpdates: bone.automaticUpdates,
+          boneEnabled: bone.enabled,
+          bonePaused: bone.isPaused,
+          isSumOfForcesOnBone: bone.isSumOfForcesOnBone,
+          simulationFrameRate: bone.simulationFrameRate,
+          slowMotionScale: bone.slowMotionScale,
+          updateSkipReason: getUpdateSkipReason(bone),
           animatedTipDelta: vectorSnapshot(animatedTipDelta),
           velocity: vectorSnapshot(velocity),
           headMovement: vectorSnapshot(bone.state.cachedMovement),
@@ -627,6 +645,7 @@ export class UnityPrefabSpringRuntime {
     }
     topOffsets.sort((a, b) => b.offset - a.offset);
     skirtOffsets.sort((a, b) => b.offset - a.offset);
+    const debugOffsets = selectDebugOffsets(topOffsets, debugOptions);
     const controlledPartDiagnostics = buildControlledPartDiagnostics(this.bones, this.skinnedBones);
     return {
       runtimeMode: "unity-prefab",
@@ -643,6 +662,7 @@ export class UnityPrefabSpringRuntime {
       maxSleeveOffset,
       maxSkirtOffset,
       topOffsets: topOffsets.slice(0, 8),
+      debugOffsets,
       controlledPartCounts: controlledPartDiagnostics.counts,
       controlledHairSamples: controlledPartDiagnostics.hairSamples,
       skirtOffsets,
@@ -1997,6 +2017,53 @@ function vectorSnapshot(vector: THREE.Vector3): RuntimeTraceEvent["boneAxis"] {
     z: vector.z,
     length: vector.length(),
   };
+}
+
+function selectDebugOffsets(
+  offsets: UtjSpringBoneRuntimeSnapshot["topOffsets"],
+  debugOptions: UtjSpringBoneDebugOptions
+) {
+  if (debugOptions.springDebugAllOffsets) {
+    return offsets;
+  }
+  const filters = (debugOptions.springDebugBones ?? [])
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  if (filters.length === 0) {
+    return [];
+  }
+  return offsets.filter((offset) => {
+    const haystack = [
+      offset.name,
+      offset.path,
+      offset.springName,
+      offset.sourceBoneName,
+      offset.sourceBonePath,
+      offset.pivotSourceName,
+      offset.pivotSourcePath,
+      offset.pivotResolvedPath,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n")
+      .toLowerCase();
+    return filters.some((filter) => haystack.includes(filter));
+  });
+}
+
+function getUpdateSkipReason(bone: RuntimeBone): string | null {
+  if (!bone.automaticUpdates) {
+    return "automaticUpdates=false";
+  }
+  if (!bone.enabled) {
+    return "enabled=false";
+  }
+  if (bone.isPaused) {
+    return "isPaused=true";
+  }
+  if (!bone.isSumOfForcesOnBone) {
+    return "isSumOfForcesOnBone=false";
+  }
+  return null;
 }
 
 function nullableVectorSnapshot(vector?: THREE.Vector3): RuntimeTraceEvent["boneAxis"] | null {
