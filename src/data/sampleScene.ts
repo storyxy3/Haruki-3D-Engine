@@ -123,6 +123,10 @@ export type MaterialLightingSettings = {
 
 export type BodyMaterialSlot = {
   meshName: string;
+  slotIndex: number;
+  materialKey: string;
+  materialFileId: number;
+  materialPathId: number;
   materialName?: string;
   materialKind?: string;
   mainTex?: string;
@@ -133,6 +137,10 @@ export type BodyMaterialSlot = {
 
 export type FaceMaterialSlot = {
   meshName: string;
+  slotIndex: number;
+  materialKey: string;
+  materialFileId: number;
+  materialPathId: number;
   materialName?: string;
   materialKind?: string;
   mainTex?: string;
@@ -425,6 +433,10 @@ export const sampleCatalog: CharacterImportCatalog = {
       bodyMaterials: [
         {
           meshName: "Body",
+          slotIndex: 0,
+          materialKey: "0:1",
+          materialFileId: 0,
+          materialPathId: 1,
           mainTex: "/assets/char05/body_main.png",
           shadowTex: "/assets/char05/body_shadow.png",
           valueTex: "/assets/char05/body_value.png",
@@ -461,6 +473,10 @@ export const sampleCatalog: CharacterImportCatalog = {
       bodyMaterials: [
         {
           meshName: "Body",
+          slotIndex: 0,
+          materialKey: "0:1",
+          materialFileId: 0,
+          materialPathId: 1,
           mainTex: "/assets/char05/stage_main.png",
           shadowTex: "/assets/char05/stage_shadow.png",
           valueTex: "/assets/char05/stage_value.png",
@@ -502,6 +518,10 @@ export const sampleCatalog: CharacterImportCatalog = {
       faceMaterials: [
         {
           meshName: "Face",
+          slotIndex: 0,
+          materialKey: "0:1",
+          materialFileId: 0,
+          materialPathId: 1,
           mainTex: "/assets/head0100/face_main.png",
           shadowTex: "/assets/head0100/face_shadow.png",
           faceShadowTex: "/assets/head0100/face_sdf.png",
@@ -544,6 +564,10 @@ export const sampleCatalog: CharacterImportCatalog = {
       faceMaterials: [
         {
           meshName: "Face",
+          slotIndex: 0,
+          materialKey: "0:1",
+          materialFileId: 0,
+          materialPathId: 1,
           mainTex: "/assets/head0100sdf/face_main.png",
           shadowTex: "/assets/head0100sdf/face_shadow.png",
           faceShadowTex: "/assets/head0100sdf/face_sdf.png",

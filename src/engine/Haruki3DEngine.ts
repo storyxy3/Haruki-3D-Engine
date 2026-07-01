@@ -383,6 +383,8 @@ export type RuntimeDebugSnapshot = {
   head: RuntimeMaterialDebug[];
   headMaterialSlots: Array<{
     meshName: string;
+    slotIndex: number;
+    materialKey: string;
     materialName?: string;
     materialKind?: string;
     valueTex?: string;
@@ -714,6 +716,10 @@ type RuntimeNativeMeshSource = {
 };
 
 type RuntimeNativeSubmeshSource = {
+  slotIndex: number;
+  materialKey: string;
+  materialFileId?: number;
+  materialPathId?: number;
   materialName?: string;
   start?: number;
   count?: number;
@@ -2432,11 +2438,18 @@ function installUnityRuntimeNativeMeshes(
     }
 
     const materials = (source.submeshes ?? []).map((submesh) => {
+      if (!submesh.materialKey || typeof submesh.slotIndex !== "number") {
+        throw new Error(
+          `Native mesh '${source.meshPath ?? source.meshName ?? "<unnamed>"}' has a submesh without material identity; regenerate it with Haruki-3D-Exporter materialKey runtime support.`
+        );
+      }
       const material = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         vertexColors: geometry.hasAttribute("color"),
       });
       material.name = submesh.materialName ?? source.meshName ?? source.meshPath ?? "native_material";
+      material.userData.pjskMaterialKey = submesh.materialKey;
+      material.userData.pjskMaterialSlotIndex = submesh.slotIndex;
       return material;
     });
     const meshMaterials = materials.length > 0 ? materials : [new THREE.MeshBasicMaterial({ color: 0xffffff })];
@@ -4328,6 +4341,8 @@ export class Haruki3DEngine {
       ...structuredClone(this.runtimeDebug),
       headMaterialSlots: this.currentHeadAsset?.faceMaterials.map((slot) => ({
         meshName: slot.meshName,
+        slotIndex: slot.slotIndex,
+        materialKey: slot.materialKey,
         materialName: slot.materialName,
         materialKind: slot.materialKind,
         valueTex: slot.valueTex,
@@ -6350,6 +6365,7 @@ export class Haruki3DEngine {
     const slotEntries: Array<{
       key: string;
       meshKey: string;
+      materialKey: string;
       materialName: string | null;
       materialKind: string;
       mainTex: string | null;
@@ -6393,12 +6409,14 @@ export class Haruki3DEngine {
         bodyDebugMode: bodyDebugModeToUniform(this.bodyDebugMode),
       });
       material.userData.pjskLighting = lighting;
+      material.userData.pjskMaterialKind = materialKind;
+      material.userData.pjskMaterialKey = slot.materialKey;
+      material.userData.pjskMaterialSlotIndex = slot.slotIndex;
       const meshKey = normalizeMeshSlotName(slot.meshName);
       slotEntries.push({
-        key: slot.materialName
-          ? `mat:${slot.materialName.toLowerCase()}`
-          : `mesh:${meshKey}`,
+        key: slot.materialKey,
         meshKey,
+        materialKey: slot.materialKey,
         materialName: slot.materialName?.toLowerCase() ?? null,
         materialKind,
         mainTex: slot.mainTex ?? null,
@@ -6419,15 +6437,25 @@ export class Haruki3DEngine {
         : [mesh.material];
       const meshKey = normalizeMeshSlotName(mesh.name);
       const meshSlots = slotEntries.filter((entry) => entry.meshKey === meshKey);
-      const allowMeshFallback = !options.exactMaterialNameOnly;
       const resolvedEntriesByIndex: Array<typeof slotEntries[number] | null> = [];
       const rebound = originalMaterials.map((original, index) => {
-        const resolvedByMaterialName = slotEntries.find(
-          (entry) => entry.materialName === original.name.toLowerCase()
+        const originalMaterialKey = typeof original.userData.pjskMaterialKey === "string"
+          ? original.userData.pjskMaterialKey
+          : "";
+        const resolvedByMaterialKey = meshSlots.find(
+          (entry) => entry.materialKey === originalMaterialKey
         );
-        const resolvedEntry =
-          resolvedByMaterialName ??
-          (allowMeshFallback ? meshSlots[index] ?? meshSlots[0] ?? null : null);
+        const resolvedEntry = resolvedByMaterialKey ?? null;
+        if (!originalMaterialKey) {
+          throw new Error(
+            `Body mesh '${mesh.name}' material '${original.name}' is missing pjskMaterialKey; regenerate it with Haruki-3D-Exporter materialKey runtime support.`
+          );
+        }
+        if (!resolvedEntry) {
+          throw new Error(
+            `Body mesh '${mesh.name}' material key '${originalMaterialKey}' was not found in body material slots.`
+          );
+        }
         if (resolvedEntry) {
           const mainMap = this.extractColorMap(original);
           this.syncReplacementTextureFromOriginal(resolvedEntry.material, mainMap);
@@ -6516,21 +6544,7 @@ export class Haruki3DEngine {
           });
           return resolvedEntry.material;
         }
-        if (allowMeshFallback) {
-          this.runtimeDebug.body.push({
-            meshName: mesh.name,
-            sourceMaterialName: original.name,
-            resolvedKey: null,
-            resolvedKind: null,
-            usedOriginalMap: false,
-            boundMainTex: null,
-            boundShadowTex: null,
-            boundValueTex: null,
-            boundFaceShadowTex: null,
-            finalMaterialType: original.type,
-          });
-        }
-        return original;
+        throw new Error("Unreachable body material identity resolution state.");
       });
       disposeReplacedMaterials(originalMaterials, rebound);
       mesh.material = Array.isArray(mesh.material) ? rebound : rebound[0];
@@ -6553,6 +6567,7 @@ export class Haruki3DEngine {
     const slotEntries: Array<{
       key: string;
       meshKey: string;
+      materialKey: string;
       materialName: string | null;
       materialKind: string;
       mainTex: string | null;
@@ -6581,7 +6596,6 @@ export class Haruki3DEngine {
       const shadowTex = await this.loadTexture(slot.shadowTex);
       const valueTex = await this.loadTexture(slot.valueTex, THREE.NoColorSpace);
       const faceShadowTex = await this.loadTexture(slot.faceShadowTex, THREE.NoColorSpace);
-      const key = slot.meshName.toLowerCase();
       const kind = slot.materialKind ?? "face";
       const lighting = tuneLightingForPreview(kind, slot.lighting);
       let material: THREE.Material;
@@ -6816,15 +6830,18 @@ export class Haruki3DEngine {
       }
       material.userData.pjskLighting = lighting;
       material.userData.pjskMaterialKind = kind;
+      material.userData.pjskMaterialKey = slot.materialKey;
+      material.userData.pjskMaterialSlotIndex = slot.slotIndex;
       if (topLayerMaterial) {
         topLayerMaterial.userData.pjskLighting = lighting;
         topLayerMaterial.userData.pjskMaterialKind = kind;
+        topLayerMaterial.userData.pjskMaterialKey = slot.materialKey;
+        topLayerMaterial.userData.pjskMaterialSlotIndex = slot.slotIndex;
       }
       slotEntries.push({
-        key: slot.materialName
-          ? `mat:${slot.materialName.toLowerCase()}`
-          : `mesh:${key}`,
+        key: slot.materialKey,
         meshKey: normalizeMeshSlotName(slot.meshName),
+        materialKey: slot.materialKey,
         materialName: slot.materialName?.toLowerCase() ?? null,
         materialKind: kind,
         mainTex: slot.mainTex ?? null,
@@ -6856,15 +6873,25 @@ export class Haruki3DEngine {
         : [mesh.material];
       const meshKey = normalizeMeshSlotName(mesh.name);
       const meshSlots = slotEntries.filter((entry) => entry.meshKey === meshKey);
-      const allowMeshFallback = !options.exactMaterialNameOnly;
       const resolvedEntriesByIndex: Array<typeof slotEntries[number] | null> = [];
       const rebound = originalMaterials.map((original, index) => {
-        const resolvedByMaterialName = slotEntries.find(
-          (entry) => entry.materialName === original.name.toLowerCase()
+        const originalMaterialKey = typeof original.userData.pjskMaterialKey === "string"
+          ? original.userData.pjskMaterialKey
+          : "";
+        const resolvedByMaterialKey = meshSlots.find(
+          (entry) => entry.materialKey === originalMaterialKey
         );
-        const resolvedEntry =
-          resolvedByMaterialName ??
-          (allowMeshFallback ? meshSlots[index] ?? meshSlots[0] ?? null : null);
+        const resolvedEntry = resolvedByMaterialKey ?? null;
+        if (!originalMaterialKey) {
+          throw new Error(
+            `Head mesh '${mesh.name}' material '${original.name}' is missing pjskMaterialKey; regenerate it with Haruki-3D-Exporter materialKey runtime support.`
+          );
+        }
+        if (!resolvedEntry) {
+          throw new Error(
+            `Head mesh '${mesh.name}' material key '${originalMaterialKey}' was not found in head material slots.`
+          );
+        }
         if (resolvedEntry) {
           const mainMap = this.extractColorMap(original);
           this.syncReplacementTextureFromOriginal(resolvedEntry.material, mainMap);
@@ -6990,23 +7017,7 @@ export class Haruki3DEngine {
           });
           return resolvedEntry.material;
         }
-        if (allowMeshFallback) {
-          mesh.renderOrder = mesh.name.toLowerCase().includes("face") ? 10 : 12;
-          mesh.userData.pjskMaterialKind = null;
-          this.runtimeDebug.head.push({
-            meshName: mesh.name,
-            sourceMaterialName: original.name,
-            resolvedKey: null,
-            resolvedKind: null,
-            usedOriginalMap: false,
-            boundMainTex: null,
-            boundShadowTex: null,
-            boundValueTex: null,
-            boundFaceShadowTex: null,
-            finalMaterialType: original.type,
-          });
-        }
-        return original;
+        throw new Error("Unreachable head material identity resolution state.");
       });
       const meshRenderOrder = resolvedEntriesByIndex.reduce((minimum, entry) => {
         if (!entry) {

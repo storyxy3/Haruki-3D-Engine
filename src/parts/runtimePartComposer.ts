@@ -1531,7 +1531,7 @@ function mergeNativeMeshes(runtimes: PartRuntimePackage[], runtimeSetup: Runtime
       const dedupeKey = [
         readOptionalString(mesh.meshName),
         readOptionalString(mesh.meshPath),
-        readRecordArray(mesh.submeshes).map((submesh) => readOptionalString(submesh.materialName)).join(","),
+        readRecordArray(mesh.submeshes).map((submesh) => readOptionalString(submesh.materialKey)).join(","),
       ].join("|");
       if (optionalMeshKeys.has(dedupeKey)) {
         warnings.push(

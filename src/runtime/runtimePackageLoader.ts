@@ -597,6 +597,27 @@ function readNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function readRequiredMaterialIdentity(slot: UnknownRecord, context: string) {
+  const materialKey = readString(slot.materialKey ?? slot.MaterialKey);
+  const materialFileId = slot.materialFileId ?? slot.MaterialFileId;
+  const materialPathId = slot.materialPathId ?? slot.MaterialPathId;
+  if (
+    !materialKey ||
+    typeof materialFileId !== "number" ||
+    !Number.isFinite(materialFileId) ||
+    typeof materialPathId !== "number" ||
+    !Number.isFinite(materialPathId)
+  ) {
+    throw new Error(`${context} is missing material identity; regenerate it with Haruki-3D-Exporter materialKey runtime support.`);
+  }
+  return {
+    slotIndex: readNumber(slot.slotIndex ?? slot.SlotIndex, 0),
+    materialKey,
+    materialFileId,
+    materialPathId,
+  };
+}
+
 function readStringArray(value: unknown) {
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === "string")
@@ -717,8 +738,10 @@ function normalizeBodyManifest(
     },
     bodyMaterials: bodyMaterialsRaw.map((entry) => {
       const slot = asRecord(entry);
+      const identity = readRequiredMaterialIdentity(slot, "body material slot");
       return {
         meshName: readString(slot.meshName ?? slot.MeshName),
+        ...identity,
         materialName: readString(slot.materialName ?? slot.MaterialName) || undefined,
         materialKind: readString(slot.materialKind ?? slot.MaterialKind) || undefined,
         mainTex: resolveOptionalPath(readString(slot.mainTex ?? slot.MainTex), resolvePath),
@@ -797,8 +820,10 @@ function normalizeHeadManifest(
       })),
     faceMaterials: faceMaterialsRaw.map((entry) => {
       const slot = asRecord(entry);
+      const identity = readRequiredMaterialIdentity(slot, "head material slot");
       return {
         meshName: readString(slot.meshName ?? slot.MeshName),
+        ...identity,
         materialName: readString(slot.materialName ?? slot.MaterialName) || undefined,
         materialKind: readString(slot.materialKind ?? slot.MaterialKind) || undefined,
         mainTex: resolveOptionalPath(readString(slot.mainTex ?? slot.MainTex), resolvePath),
@@ -893,8 +918,10 @@ function applyRuntimeMaterialSlots(
   if (bodySlots.length) {
     bodyAsset.bodyMaterials = bodySlots.map((entry) => {
       const slot = asRecord(entry);
+      const identity = readRequiredMaterialIdentity(slot, "runtime body material slot");
       return {
         meshName: readString(slot.meshName ?? slot.MeshName),
+        ...identity,
         materialName: readString(slot.materialName ?? slot.MaterialName) || undefined,
         materialKind: readString(slot.materialKind ?? slot.MaterialKind) || undefined,
         mainTex: resolveOptionalPath(readString(slot.mainTex ?? slot.MainTex), resolvePath),
@@ -907,8 +934,10 @@ function applyRuntimeMaterialSlots(
 
   const readHeadMaterialSlot = (entry: unknown, fallbackMaterialKind?: string) => {
     const slot = asRecord(entry);
+    const identity = readRequiredMaterialIdentity(slot, "runtime head material slot");
     return {
       meshName: readString(slot.meshName ?? slot.MeshName),
+      ...identity,
       materialName: readString(slot.materialName ?? slot.MaterialName) || undefined,
       materialKind: readString(slot.materialKind ?? slot.MaterialKind) || fallbackMaterialKind || undefined,
       mainTex: resolveOptionalPath(readString(slot.mainTex ?? slot.MainTex), resolvePath),
