@@ -34,6 +34,7 @@ const {
   defaultCameraPreset,
   tempCaptureTtlMs,
   captureGCIntervalMs,
+  idleShutdownMs,
 } = resolveCaptureServerOptions(engineConfig);
 
 const mimeByExtension = new Map([
@@ -78,13 +79,7 @@ function safeJoin(root, requestPath) {
   return resolved;
 }
 
-function serveFile(root, relativePath, req, res) {
-  const filePath = safeJoin(root, relativePath);
-  if (!filePath) {
-    res.writeHead(403);
-    res.end("forbidden");
-    return;
-  }
+function serveResolvedFile(filePath, req, res, extraHeaders = {}) {
   fs.stat(filePath, (error, stat) => {
     if (error || !stat.isFile()) {
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
@@ -97,6 +92,7 @@ function serveFile(root, relativePath, req, res) {
       "content-length": String(stat.size),
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
+      ...extraHeaders,
     };
     if (req.method === "HEAD") {
       res.writeHead(200, headers);
@@ -106,6 +102,38 @@ function serveFile(root, relativePath, req, res) {
     res.writeHead(200, headers);
     fs.createReadStream(filePath).pipe(res);
   });
+}
+
+function serveFile(root, relativePath, req, res) {
+  const filePath = safeJoin(root, relativePath);
+  if (!filePath) {
+    res.writeHead(403);
+    res.end("forbidden");
+    return;
+  }
+  serveResolvedFile(filePath, req, res);
+}
+
+function serveRuntimeFile(root, relativePath, req, res) {
+  const filePath = safeJoin(root, relativePath);
+  if (!filePath) {
+    res.writeHead(403);
+    res.end("forbidden");
+    return;
+  }
+
+  if (path.extname(filePath).toLowerCase() === ".json" && !fs.existsSync(filePath)) {
+    const gzipPath = `${filePath}.gz`;
+    if (fs.existsSync(gzipPath)) {
+      serveResolvedFile(gzipPath, req, res, {
+        "content-type": "application/json; charset=utf-8",
+        "content-encoding": "gzip",
+      });
+      return;
+    }
+  }
+
+  serveResolvedFile(filePath, req, res);
 }
 
 function readRequestJson(req) {
@@ -460,6 +488,7 @@ class CaptureRuntimeSession {
     this.tempRoot = "";
     this.ready = false;
     this.restarting = false;
+    this.idleStopped = false;
     this.startPromise = null;
   }
 
@@ -467,6 +496,7 @@ class CaptureRuntimeSession {
     return {
       ready: this.ready,
       restarting: this.restarting,
+      idleStopped: this.idleStopped,
     };
   }
 
@@ -484,8 +514,9 @@ class CaptureRuntimeSession {
 
   async start(timeoutMs = defaultTimeoutMs) {
     this.restarting = true;
-    await this.stop();
+    await this.stop(false);
     this.ready = false;
+    this.idleStopped = false;
     this.chromiumLog = "";
     this.tempRoot = makeTempDir();
     const debugPort = await getFreePort();
@@ -549,7 +580,7 @@ class CaptureRuntimeSession {
       if (this.chromiumLog.trim()) {
         console.error(this.chromiumLog.trim());
       }
-      await this.stop();
+      await this.stop(false);
       throw error;
     } finally {
       this.restarting = false;
@@ -560,8 +591,9 @@ class CaptureRuntimeSession {
     await this.start(timeoutMs);
   }
 
-  async stop() {
+  async stop(idleStopped = false) {
     this.ready = false;
+    this.idleStopped = idleStopped;
     this.client?.close();
     this.client = null;
     const chromium = this.chromium;
@@ -618,6 +650,29 @@ class CaptureRuntimeSession {
 }
 
 const captureSession = new CaptureRuntimeSession();
+let idleShutdownTimer = null;
+
+function clearIdleShutdownTimer() {
+  if (!idleShutdownTimer) {
+    return;
+  }
+  clearTimeout(idleShutdownTimer);
+  idleShutdownTimer = null;
+}
+
+function scheduleIdleShutdown() {
+  clearIdleShutdownTimer();
+  if (idleShutdownMs <= 0) {
+    return;
+  }
+  idleShutdownTimer = setTimeout(() => {
+    idleShutdownTimer = null;
+    captureSession.stop(true).catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+    });
+  }, idleShutdownMs);
+  idleShutdownTimer.unref?.();
+}
 
 async function captureRoleParts(input) {
   const request = validateCaptureRequest(input);
@@ -660,8 +715,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && requestUrl.pathname === "/capture") {
+      clearIdleShutdownTimer();
       const body = await readRequestJson(req);
-      const result = await enqueue(() => captureRoleParts(body));
+      const result = await enqueue(async () => {
+        clearIdleShutdownTimer();
+        try {
+          return await captureRoleParts(body);
+        } finally {
+          scheduleIdleShutdown();
+        }
+      });
       sendJson(res, 200, result);
       return;
     }
@@ -670,7 +733,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if ((req.method === "GET" || req.method === "HEAD") && requestUrl.pathname.startsWith("/runtime/")) {
-      serveFile(runtimeRoot, requestUrl.pathname.slice("/runtime/".length), req, res);
+      serveRuntimeFile(runtimeRoot, requestUrl.pathname.slice("/runtime/".length), req, res);
       return;
     }
     if (req.method === "GET" || req.method === "HEAD") {
@@ -681,6 +744,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(405);
     res.end("method not allowed");
   } catch (error) {
+    scheduleIdleShutdown();
     sendJson(res, 500, {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -697,11 +761,14 @@ server.listen(port, "0.0.0.0", () => {
     chromium: chromiumPath,
     tempCaptureTtlMs,
     captureGCIntervalMs,
+    idleShutdownMs,
   }));
   startTemporaryCaptureGC();
-  void captureSession.ensureStarted().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-  });
+  void captureSession.ensureStarted()
+    .then(scheduleIdleShutdown)
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+    });
 });
 
 function startTemporaryCaptureGC() {
@@ -741,6 +808,7 @@ async function cleanupExpiredTemporaryCaptures(nowMs) {
 }
 
 async function shutdown(signal) {
+  clearIdleShutdownTimer();
   await captureSession.stop();
   process.kill(process.pid, signal);
 }

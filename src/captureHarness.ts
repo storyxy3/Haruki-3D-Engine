@@ -55,6 +55,7 @@ const engine = new Haruki3DEngine({
 });
 
 let captureRuntimePackagePromise: Promise<void> | null = null;
+let captureRuntimePackageRoleId: string | null = null;
 
 function getCaptureWindow() {
   return window as CaptureWindow;
@@ -197,16 +198,23 @@ function setCaptureError(error: unknown) {
   getCaptureWindow().__PJSK_CAPTURE_ERROR__ = message;
 }
 
-async function ensureCaptureRuntimePackage(config: CaptureConfig) {
+async function ensureCaptureRuntimePackage(config: CaptureConfig, roleId: string) {
+  if (captureRuntimePackagePromise && captureRuntimePackageRoleId !== roleId) {
+    captureRuntimePackagePromise = null;
+    captureRuntimePackageRoleId = null;
+  }
   if (!captureRuntimePackagePromise) {
+    captureRuntimePackageRoleId = roleId;
     captureRuntimePackagePromise = engine.loadRuntimePackage({
       baseUrl: config.baseUrl,
       fullRuntimeOnly: config.fullRuntimeOnly,
       deferDefaultSelection: !config.fullRuntimeOnly,
+      roleId,
       applyDefaultAnimation: config.fullRuntimeOnly,
       applyFaceMotion: config.fullRuntimeOnly,
     }).then(() => undefined, (error) => {
       captureRuntimePackagePromise = null;
+      captureRuntimePackageRoleId = null;
       throw error;
     });
   }
@@ -225,7 +233,7 @@ getCaptureWindow().__HARUKI_CAPTURE_REQUEST__ = async (
     getCaptureWindow().__PJSK_CAPTURE_ERROR__ = "";
     document.body.dataset.captureReady = "false";
     document.body.dataset.captureError = "";
-    await ensureCaptureRuntimePackage(config);
+    await ensureCaptureRuntimePackage(config, request.roleId);
     engine.setViewportSize(root.clientWidth, root.clientHeight);
     const result = await engine.captureRoleParts({
       ...request,

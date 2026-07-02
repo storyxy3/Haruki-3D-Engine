@@ -14,6 +14,7 @@ import {
 export type CustomWardrobeControllerOptions = {
   resolveUrl: (path: string) => string;
   loadPartRuntime?: (entry: PartRegistryEntry) => Promise<PartRuntimePackage | null>;
+  ensureCompatibility?: (selection: CustomPartSelection) => Promise<void>;
 };
 
 export class CustomWardrobeController {
@@ -98,6 +99,7 @@ export class CustomWardrobeController {
     this.assertSameActiveCharacter(selection);
     this.activeRoleId ??= runtimeRoleId(selection.characterId, selection.unit);
     await this.ensureSelectionPackages(selection);
+    await this.options.ensureCompatibility?.(selection);
     const combined = this.compose(selection);
     this.selection = { ...selection };
     this.combined = combined;
@@ -132,6 +134,7 @@ export class CustomWardrobeController {
   async composeCustomCharacter(selection: CustomPartSelection): Promise<RuntimeCombinedCharacterAsset> {
     this.assertSameActiveCharacter(selection);
     await this.ensureSelectionPackages(selection);
+    await this.options.ensureCompatibility?.(selection);
     return this.compose(selection);
   }
 

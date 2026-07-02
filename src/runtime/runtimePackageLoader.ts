@@ -47,6 +47,7 @@ export type RuntimePackageLoadResult = {
 export type RuntimePackageLoadOptions = {
   fullRuntimeOnly?: boolean;
   deferDefaultSelection?: boolean;
+  roleId?: string | null;
 };
 
 export async function loadRuntimePackageFromBaseUrl(
@@ -60,11 +61,14 @@ export async function loadRuntimePackageFromBaseUrl(
     try {
       const partSet = await loadPartPackageSetFromBaseUrl(baseUrl, {
         deferDefaultSelection: options.deferDefaultSelection,
+        roleId: options.roleId,
       });
       const wardrobe = new CustomWardrobeController({
         resolveUrl: (path) => resolveRuntimePackageUrl(baseUrl, path),
         loadPartRuntime: async (entry) =>
           loadPartRuntimePackage(partSet, entry, baseUrl),
+        ensureCompatibility: async (selection) =>
+          ensureCompatibilityForSelection(partSet, selection.unit, baseUrl),
       });
       const combinedCharacter = wardrobe.loadPartPackageSet(partSet, {
         composeDefault: !options.deferDefaultSelection,
@@ -179,17 +183,39 @@ async function loadFullRuntimePackageFromBaseUrl(
 
 async function loadPartPackageSetFromBaseUrl(
   baseUrl: string,
-  options: { deferDefaultSelection?: boolean } = {}
+  options: { deferDefaultSelection?: boolean; roleId?: string | null } = {}
 ): Promise<PartPackageSet> {
-  const registry = normalizePartRegistry(await fetchRuntimeJson(
-    resolveRuntimePackageUrl(baseUrl, "parts/part-registry.json")
-  ) as PartRegistryInput);
-  const characterIndex = await fetchOptionalJson<Character3dIndex>(
-    resolveRuntimePackageUrl(baseUrl, "character3d-index.json")
-  );
-  const compatibility = await fetchOptionalJson<HeadHairCompatibility>(
-    resolveRuntimePackageUrl(baseUrl, "parts/head-hair-compatibility.json")
-  );
+  const role = parseRuntimeRoleIdOption(options.roleId);
+  const scopedRoot = role
+    ? `parts/by-role/${role.characterId}/${runtimePathUnitSegment(role.unit)}`
+    : null;
+  const scopedRegistry = scopedRoot
+    ? await fetchOptionalJson<PartRegistryInput>(
+      resolveRuntimePackageUrl(baseUrl, `${scopedRoot}/part-registry.json`)
+    )
+    : null;
+  const registry = scopedRegistry
+    ? normalizePartRegistry(scopedRegistry)
+    : normalizePartRegistry(await fetchRuntimeJson(
+      resolveRuntimePackageUrl(baseUrl, "parts/part-registry.json")
+    ) as PartRegistryInput);
+  const characterIndex = scopedRoot
+    ? (
+      await fetchOptionalJson<Character3dIndex>(
+        resolveRuntimePackageUrl(baseUrl, `${scopedRoot}/character3d-index.json`)
+      ) ??
+      await fetchOptionalJson<Character3dIndex>(
+        resolveRuntimePackageUrl(baseUrl, "character3d-index.json")
+      )
+    )
+    : await fetchOptionalJson<Character3dIndex>(
+      resolveRuntimePackageUrl(baseUrl, "character3d-index.json")
+    );
+  const compatibility = role
+    ? null
+    : await fetchOptionalJson<HeadHairCompatibility>(
+      resolveRuntimePackageUrl(baseUrl, "parts/head-hair-compatibility.json")
+    );
   const characterIndexEntries = characterIndex ? getCharacterIndexEntries(characterIndex) : [];
   const packages = new Map<string, PartRuntimePackage>();
   if (options.deferDefaultSelection) {
@@ -361,6 +387,46 @@ async function loadPartRuntimePackage(
   const normalized = withPartRuntimePackagePath(runtime, entry);
   partSet.packages.set(entry.packagePath, normalized);
   return normalized;
+}
+
+async function ensureCompatibilityForSelection(
+  partSet: PartPackageSet,
+  unit: string | null | undefined,
+  baseUrl = partSet.baseUrl
+) {
+  if (partSet.compatibility) {
+    return;
+  }
+  const scoped = await fetchOptionalJson<HeadHairCompatibility>(
+    resolveRuntimePackageUrl(
+      baseUrl,
+      `parts/compat/by-unit/${runtimePathUnitSegment(unit)}/head-hair-compatibility.json`
+    )
+  );
+  const fallback = scoped ?? await fetchOptionalJson<HeadHairCompatibility>(
+    resolveRuntimePackageUrl(baseUrl, "parts/head-hair-compatibility.json")
+  );
+  if (!fallback) {
+    throw new Error(`Head-hair compatibility registry is required for unit ${unit ?? ""}.`);
+  }
+  partSet.compatibility = fallback;
+}
+
+function parseRuntimeRoleIdOption(roleId: string | null | undefined) {
+  if (!roleId) {
+    return null;
+  }
+  const [characterIdPart, ...unitParts] = roleId.split(":");
+  const characterId = Number(characterIdPart);
+  if (!Number.isInteger(characterId) || characterId <= 0) {
+    return null;
+  }
+  const unit = unitParts.join(":") || null;
+  return { characterId, unit };
+}
+
+function runtimePathUnitSegment(unit: string | null | undefined) {
+  return unit || "default";
 }
 
 function withPartRuntimePackagePath(

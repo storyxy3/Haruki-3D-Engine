@@ -81,11 +81,11 @@ Runtime-local defaults live in `haruki-3d-engine.config.json`. This file is igno
 The example file is safe for public use and should not contain machine-specific paths. The real config can define:
 
 - `capture.runtimeRoot` and `capture.outputDir` for the capture server.
-- capture defaults such as `width`, `height`, `scale`, `timeoutMs`, `phase`, `clip`, `springRuntimeMode`, and `cameraPreset`.
+- capture defaults such as `width`, `height`, `scale`, `timeoutMs`, `phase`, `clip`, `springRuntimeMode`, `cameraPreset`, and `idleShutdown`.
 - `chromium.executable` when Chromium is not on `PATH`.
 - `server.port` for the HTTP capture service.
 
-For one-shot capture, pass `--config <json>`. For the HTTP service, set `HARUKI_ENGINE_CONFIG=<json>` or place `haruki-3d-engine.config.json` in the working directory. CLI flags override config values for one-shot capture. Server environment variables such as `HARUKI_RUNTIME_ROOT`, `HARUKI_CAPTURE_OUTPUT_DIR`, `HARUKI_CAPTURE_SCALE`, `HARUKI_CAPTURE_TIMEOUT_MS`, `CHROMIUM`, and `PORT` override config values.
+For one-shot capture, pass `--config <json>`. For the HTTP service, set `HARUKI_ENGINE_CONFIG=<json>` or place `haruki-3d-engine.config.json` in the working directory. CLI flags override config values for one-shot capture. Server environment variables such as `HARUKI_RUNTIME_ROOT`, `HARUKI_CAPTURE_OUTPUT_DIR`, `HARUKI_CAPTURE_SCALE`, `HARUKI_CAPTURE_TIMEOUT_MS`, `HARUKI_CAPTURE_IDLE_SHUTDOWN`, `CHROMIUM`, and `PORT` override config values.
 
 ## Runtime Behavior
 
@@ -127,6 +127,8 @@ docker run --rm -p 8080:8080 \
   -v /path/to/captures:/data/captures \
   haruki-3d-engine
 ```
+
+The service keeps Chromium warm for capture requests and stops it after `HARUKI_CAPTURE_IDLE_SHUTDOWN` of inactivity. The default is `1h`; use `30m` for a shorter idle window or `0` to disable idle shutdown.
 
 Capture API:
 

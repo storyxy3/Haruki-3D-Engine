@@ -29,7 +29,8 @@ test("loads engine config JSON and applies capture runtime CLI overrides", () =>
       springRuntimeMode: "unity-prefab",
       cameraPreset: "capture",
       tempTtl: "30m",
-      gcInterval: "15m"
+      gcInterval: "15m",
+      idleShutdown: "45m"
     },
     chromium: {
       executable: "/usr/bin/chromium"
@@ -65,6 +66,7 @@ test("loads engine config JSON and applies capture runtime CLI overrides", () =>
   assert.equal(server.defaultCameraPreset, "capture");
   assert.equal(server.tempCaptureTtlMs, 30 * 60 * 1000);
   assert.equal(server.captureGCIntervalMs, 15 * 60 * 1000);
+  assert.equal(server.idleShutdownMs, 45 * 60 * 1000);
 });
 
 test("capture server accepts documented HARUKI_CAPTURE camera and spring env names", () => {
@@ -79,6 +81,22 @@ test("capture server accepts documented HARUKI_CAPTURE camera and spring env nam
   assert.equal(server.defaultCameraPreset, "default");
 });
 
+test("capture server accepts idle shutdown duration env", () => {
+  const server = resolveCaptureServerOptions({}, {
+    HARUKI_CAPTURE_IDLE_SHUTDOWN: "30m",
+  });
+
+  assert.equal(server.idleShutdownMs, 30 * 60 * 1000);
+});
+
+test("capture server idle shutdown can be disabled", () => {
+  const server = resolveCaptureServerOptions({}, {
+    HARUKI_CAPTURE_IDLE_SHUTDOWN: "0",
+  });
+
+  assert.equal(server.idleShutdownMs, 0);
+});
+
 test("runtime package loader prefers gzip JSON packages with plain JSON fallback", () => {
   const loaderSource = fs.readFileSync(
     path.join(repoRoot, "src/runtime/runtimePackageLoader.ts"),
@@ -89,6 +107,28 @@ test("runtime package loader prefers gzip JSON packages with plain JSON fallback
   assert.ok(loaderSource.includes('new DecompressionStream("gzip")'));
   assert.ok(loaderSource.includes("JSON.parse(await readGzipRuntimeJson"));
   assert.ok(loaderSource.includes('const response = await fetch(url, { cache: "no-store" })'));
+});
+
+test("runtime package loader supports role-scoped registries and lazy compatibility", () => {
+  const loaderSource = fs.readFileSync(
+    path.join(repoRoot, "src/runtime/runtimePackageLoader.ts"),
+    "utf8"
+  );
+  const wardrobeSource = fs.readFileSync(
+    path.join(repoRoot, "src/parts/customWardrobeController.ts"),
+    "utf8"
+  );
+  const captureHarnessSource = fs.readFileSync(
+    path.join(repoRoot, "src/captureHarness.ts"),
+    "utf8"
+  );
+
+  assert.ok(loaderSource.includes("parts/by-role/${role.characterId}/${runtimePathUnitSegment(role.unit)}"));
+  assert.ok(loaderSource.includes("parts/compat/by-unit/${runtimePathUnitSegment(unit)}/head-hair-compatibility.json"));
+  assert.ok(loaderSource.includes("ensureCompatibilityForSelection"));
+  assert.ok(wardrobeSource.includes("ensureCompatibility?: (selection: CustomPartSelection) => Promise<void>;"));
+  assert.ok(captureHarnessSource.includes("captureRuntimePackageRoleId"));
+  assert.ok(captureHarnessSource.includes("roleId,"));
 });
 
 test("capture runtime accepts part-registry role capture options", () => {

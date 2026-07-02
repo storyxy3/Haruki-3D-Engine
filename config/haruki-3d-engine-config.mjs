@@ -67,6 +67,7 @@ export function resolveCaptureServerOptions(config, env = process.env) {
     ),
     tempCaptureTtlMs: durationMsAtLeast(env.HARUKI_CAPTURE_TEMP_TTL, capture.tempTtl, "6h", 0),
     captureGCIntervalMs: durationMsAtLeast(env.HARUKI_CAPTURE_GC_INTERVAL, capture.gcInterval, "1h", 0),
+    idleShutdownMs: durationMsAtLeast(env.HARUKI_CAPTURE_IDLE_SHUTDOWN, capture.idleShutdown, "1h", 0),
   };
 }
 
@@ -103,7 +104,7 @@ function clampNumber(primary, secondary, fallback, min, max) {
 
 function durationMsAtLeast(primary, secondary, fallback, min) {
   const value = durationMsValue(primary, secondary, fallback);
-  return Math.max(Math.trunc(value) || durationMsValue(fallback), min);
+  return Math.max(Math.trunc(value), min);
 }
 
 function durationMsValue(...values) {
