@@ -67,6 +67,18 @@ test("loads engine config JSON and applies capture runtime CLI overrides", () =>
   assert.equal(server.captureGCIntervalMs, 15 * 60 * 1000);
 });
 
+test("runtime package loader prefers gzip JSON packages with plain JSON fallback", () => {
+  const loaderSource = fs.readFileSync(
+    path.join(repoRoot, "src/runtime/runtimePackageLoader.ts"),
+    "utf8"
+  );
+
+  assert.ok(loaderSource.includes("const gzipUrl = `${url}.gz`;"));
+  assert.ok(loaderSource.includes('new DecompressionStream("gzip")'));
+  assert.ok(loaderSource.includes("JSON.parse(await readGzipRuntimeJson"));
+  assert.ok(loaderSource.includes('const response = await fetch(url, { cache: "no-store" })'));
+});
+
 test("persistent capture server propagates config defaults into role parts capture", () => {
   const serverSource = fs.readFileSync(
     path.join(repoRoot, "capture-server.mjs"),

@@ -378,11 +378,35 @@ function withPartRuntimePackagePath(
 }
 
 async function fetchRuntimeJson(url: string) {
+  const gzipUrl = `${url}.gz`;
+  const gzipResponse = await fetch(gzipUrl, { cache: "no-store" });
+  let gzipError: Error | null = null;
+  if (gzipResponse.ok) {
+    try {
+      return JSON.parse(await readGzipRuntimeJson(gzipResponse, gzipUrl));
+    } catch (error) {
+      gzipError = error instanceof Error
+        ? error
+        : new Error(`Failed to parse ${gzipUrl}: ${String(error)}`);
+    }
+  }
+
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
+    if (gzipError) {
+      throw gzipError;
+    }
     throw new Error(`Failed to load ${url}: HTTP ${response.status}`);
   }
   return response.json();
+}
+
+async function readGzipRuntimeJson(response: Response, url: string) {
+  if (!response.body || typeof DecompressionStream === "undefined") {
+    throw new Error(`Failed to load ${url}: gzip runtime JSON requires DecompressionStream.`);
+  }
+  const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
+  return new Response(stream).text();
 }
 
 async function fetchOptionalJson<T>(url: string): Promise<T | null> {
